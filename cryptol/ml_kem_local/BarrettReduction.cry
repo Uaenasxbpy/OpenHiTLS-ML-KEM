@@ -1,0 +1,36 @@
+module BarrettReduction where
+MLKEM_Q : [16]
+MLKEM_Q = 3329
+// 常数 v = floor(2^26 / Q + 1/2) = 20162
+V : [16]
+V = 20162
+// 舍入常数 (1 << 25)
+ROUNDING_C : [32]
+ROUNDING_C = (1 << 25)
+// 辅助函数：符号扩展 (Sign Extension)
+// 必须明确约束 n 和 m 是有限的 (fin n, fin m)
+sext : {n, m} (fin n, fin m, m >= n) => [n] -> [m]
+sext x = (repeat (x @ 0)) # x
+// 输入: int16_t (a)
+// 输出: int16_t (a mod q)
+barrett_reduction : [16] -> [16]
+barrett_reduction a = ret
+  where
+    // 1. int16_t t = ((int32_t)v * a + (1 << 25)) >> 26;
+    a_32 = sext a : [32]
+    v_32 = sext V : [32]
+    // (int32_t)v * a + ROUNDING_C
+    numerator = (v_32 * a_32) + ROUNDING_C
+    // 算术右移 26 位
+    t_32 = numerator >>$ 26
+    // 截断回 int16_t
+    t = drop t_32 : [16]
+    // 2. t *= MLKEM_Q;
+    t_q = t * MLKEM_Q
+    // 3. return a - t;
+    ret = a - t_q
+
+// 属性 3 (测试): 边界测试
+property barrett_test_zero = barrett_reduction 0 == 0
+// 约简 q 自身，应该得到 0
+property barrett_test_q = barrett_reduction MLKEM_Q == 0
