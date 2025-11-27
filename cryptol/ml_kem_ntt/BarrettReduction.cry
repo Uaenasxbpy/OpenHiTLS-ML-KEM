@@ -1,9 +1,9 @@
 module BarrettReduction where
 MLKEM_Q : [16]
 MLKEM_Q = 3329
-// 常数 v = floor(2^26 / Q + 1/2) = 20162
+// 常数 v = floor(2^26 / Q + 1/2) = 20159
 V : [16]
-V = 20162
+V = 20159
 // 舍入常数 (1 << 25)
 ROUNDING_C : [32]
 ROUNDING_C = (1 << 25)
@@ -31,7 +31,6 @@ barrett_reduction a = ret
     ret = a - t_q
 
 // 测试用例
-property barrett_test_zero : [16] -> Bit
-barrett_test_zero = barrett_reduction 0 == 0
-// // 约简 q 自身，应该得到 0
-// property barrett_test_q = barrett_reduction MLKEM_Q == 0
+property barrett_test_zero = barrett_reduction 0 == 0
+// 约简 q 自身，应该得到 0
+property barrett_test_q = barrett_reduction MLKEM_Q == 0

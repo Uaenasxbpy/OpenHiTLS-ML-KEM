@@ -1,0 +1,146 @@
+module MLKEM_ComputINTT where
+
+// 复用已有的两个模块
+import MontgomeryReduction as MR
+import BarrettReduction   as BR
+
+// -----------------------------
+// 常量（类型级）
+// -----------------------------
+type MLKEM_N      = 256
+type MLKEM_N_HALF = 128
+
+// -----------------------------
+// 工具函数：16-bit 相乘得到 32-bit
+// 对应 C 中 (int32_t)((int16_t)x * (int16_t)y)
+// -----------------------------
+mul32 : [16] -> [16] -> [32]
+mul32 x y = (MR::sext x : [32]) * (MR::sext y : [32])
+
+// -----------------------------
+// 单个长度 len 的 INTT 迭代
+//
+// C 代码片段：
+//
+//   for (uint32_t len = 2; len <= 128; len <<= 1) {
+//     for (uint32_t start = 0; start < 256; start = j + len) {
+//       zeta = psi[k--];
+//       for (j = start; j < start + len; j++) {
+//         t = a[j];
+//         a[j] = BarrettReduction(t + a[j + len]);
+//         a[j + len] = a[j + len] - t;
+//         a[j + len] = MontgomeryReduction(zeta * a[j + len]);
+//       }
+//     }
+//   }
+//
+// 这里我们对 (j, j+len) 这对系数做一次 butterfly：
+//   lo' = BR(a_lo + a_hi)
+//   hi' = MR(zeta * (a_hi - a_lo))
+// -----------------------------
+intt_stage :
+  [16]                       // len
+  -> [MLKEM_N][16]           // a
+  -> [MLKEM_N_HALF][16]      // psi
+  -> [16]                    // kBase（进入本层时的 k 值）
+  -> ([MLKEM_N][16], [16])   // (更新后的 a, 离开本层时的 k)
+intt_stage len a psi kBase = (a', kBase - numBlocks)
+  where
+    twoLen    = len * 2
+    numBlocks = 256 / twoLen   // 每层的 block 数：256 / (2*len)
+
+    // i 从 0..255 遍历所有系数下标
+    indices : [MLKEM_N][16]
+    indices = [0 .. 255]
+
+    a' : [MLKEM_N][16]
+    a' = [ newVal i | i <- indices ]
+
+    newVal : [16] -> [16]
+    newVal i =
+      if block < numBlocks
+         then if offset < len
+                 then new_lo          // 对应 a[j]
+                 else new_hi          // 对应 a[j+len]
+         else a @ i                  // 不在本层 butterfly 覆盖范围的保持不变
+      where
+        // block = i / (2*len)
+        block  = i / twoLen
+        offset = i % twoLen
+
+        // loIndex = start + (offset % len)
+        // hiIndex = loIndex + len
+        loIndex = block * twoLen + (offset % len)
+        hiIndex = loIndex + len
+
+        // C 中这一层的每个 block：
+        //   zeta = psi[k--];
+        // 所以第 block 个 block 使用 psi[kBase - block]
+        zeta = psi @ (kBase - block)
+
+        a_lo = a @ loIndex
+        a_hi = a @ hiIndex
+
+        // t = a[j];
+        // a[j]     = BarrettReduction(t + a[j+len]);
+        // a[j+len] = a[j+len] - t;
+        // a[j+len] = MontgomeryReduction(zeta * a[j+len]);
+        new_lo = BR::barrett_reduction (a_lo + a_hi)
+        diff   = a_hi - a_lo
+        new_hi = MR::montgomery_reduction (mul32 zeta diff)
+
+
+// -----------------------------
+// 整个 INTT 主过程（不含最后的乘 f）
+//
+// C 中：
+//   uint32_t k = MLKEM_N_HALF - 1;
+//   for (uint32_t len = 2; len <= 128; len <<= 1) { ... }
+//
+// 统计一下每层 block 数：
+//   len=2   -> 256 / 4   = 64
+//   len=4   -> 256 / 8   = 32
+//   len=8   -> 256 / 16  = 16
+//   len=16  -> 256 / 32  = 8
+//   len=32  -> 256 / 64  = 4
+//   len=64  -> 256 / 128 = 2
+//   len=128 -> 256 / 256 = 1
+//   总共：64+32+16+8+4+2+1 = 127
+//
+// k 从 127 开始减 127 次，最后回到 0，刚好用完 psi[0..127]。
+// -----------------------------
+intt_body :
+  [MLKEM_N][16]          // a
+  -> [MLKEM_N_HALF][16]  // psi
+  -> [MLKEM_N][16]
+intt_body a psi = a7
+  where
+    (b1, k1) = intt_stage 2   a   psi (MLKEM_N_HALF - 1)  // k=127
+    (b2, k2) = intt_stage 4   b1  psi k1
+    (b3, k3) = intt_stage 8   b2  psi k2
+    (b4, k4) = intt_stage 16  b3  psi k3
+    (b5, k5) = intt_stage 32  b4  psi k4
+    (b6, k6) = intt_stage 64  b5  psi k5
+    (b7, k7) = intt_stage 128 b6  psi k6
+    a7       = b7
+    // 此时 k7 = 0
+
+
+// -----------------------------
+// 顶层：MLKEM_ComputINTT
+//
+// C 中：
+//   const int16_t f = 512;  // Mont / 128
+//   ...
+//   for (j = 0; j < MLKEM_N; j++) {
+//     a[j] = MontgomeryReduction(a[j] * f);
+//   }
+// -----------------------------
+mlkem_computINTT :
+  [MLKEM_N][16]          // a
+  -> [MLKEM_N_HALF][16]  // psi
+  -> [MLKEM_N][16]
+mlkem_computINTT a psi = [ MR::montgomery_reduction (mul32 x f) | x <- a' ]
+  where
+    f  = 512 : [16]
+    a' = intt_body a psi

@@ -1,0 +1,45 @@
+module MontgomeryReduction where
+
+// 原函数功能是：相当于模运算，只不过使用了Montgomery Reduction 技术
+// 定义常量
+MLKEM_Q : [32]
+MLKEM_Q = 3329
+
+// MLKEM_Q_INV_BETA = -3327 (16-bit)
+MLKEM_Q_INV_BETA : [16]
+MLKEM_Q_INV_BETA = -3327
+
+// 辅助函数：符号扩展 (Sign Extension)
+// 必须明确约束 n 和 m 是有限的 (fin n, fin m)
+sext : {n, m} (fin n, fin m, m >= n) => [n] -> [m]
+sext x = (repeat (x @ 0)) # x
+
+// Montgomery Reduction 函数建模
+montgomery_reduction : [32] -> [16]
+montgomery_reduction a = ret
+  where
+    // 1. int16_t t = (int16_t)a * MLKEM_Q_INV_BETA;
+    a_low = drop a : [16]
+    t = a_low * MLKEM_Q_INV_BETA
+
+    // 2. t = (a - (int32_t)t * MLKEM_Q) >> 16;
+    // 符号扩展回 32 位
+    t_32 = sext t : [32]
+
+    // 减法和乘法
+    sub_res = a - (t_32 * MLKEM_Q)
+
+    // 算术右移
+    shifted = sub_res >>$ 16
+
+    // 返回 int16_t
+    ret = drop shifted
+
+// 测试用例
+property mr_0 =
+  montgomery_reduction (0 : [32]) == (0x0000 : [16])
+property mr_1 =
+  montgomery_reduction (1 : [32]) == (0x00A9 : [16])
+// 实际上应该是0x0000
+property mr_q =
+  montgomery_reduction (3329 : [32]) == (0x0001 : [16])
