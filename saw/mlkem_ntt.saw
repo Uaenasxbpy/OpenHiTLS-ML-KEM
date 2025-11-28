@@ -1,0 +1,81 @@
+// mlkem_ntt.saw
+// 验证 C 函数 MLKEM_ComputNTT 和 Cryptol 规格 mlkem_computNTT 的一致性
+
+// 1. 让 SAW 找到当前目录下的 .cry 文件
+cryptol_add_path ".";
+
+// 2. 加载 Cryptol 模块（把里面的定义放进当前命名空间）
+
+// cryptol_load "MontgomeryReduction.cry";
+// cryptol_load "BarrettReduction.cry";
+// cryptol_load "MLKEM_ComputNTT.cry";
+
+m <- cryptol_load "MLKEM_ComputNTT.cry";
+// cryptol_import m;
+
+
+// 在 LLVM 里分配内存并初始化为 Cryptol 值 v
+let alloc_init ty v = do {
+  p <- llvm_alloc ty;
+  llvm_points_to p (llvm_term v);
+  return p;
+};
+
+// const 指针版本
+let alloc_init_readonly ty v = do {
+  p <- llvm_alloc_readonly ty;
+  llvm_points_to p (llvm_term v);
+  return p;
+};
+
+// 生成一个 fresh 符号变量 x : ty，放到一块新内存里，返回 (x, ptr)
+let ptr_to_fresh name ty = do {
+  x <- llvm_fresh_var name ty;
+  p <- alloc_init ty x;
+  return (x, p);
+};
+
+// const 版本（给 const int16_t *psi 用）
+let ptr_to_fresh_readonly name ty = do {
+  x <- llvm_fresh_var name ty;
+  p <- alloc_init_readonly ty x;
+  return (x, p);
+};
+
+// 4. 规格：C 函数 MLKEM_ComputNTT 的行为应当等价于 Cryptol 函数
+//    mlkem_computNTT : [256][16] -> [128][16] -> [256][16]
+let mlkem_ntt_spec : LLVMSetup () =
+  do {
+    // C 原型：
+    //   void MLKEM_ComputNTT(int16_t *a, const int16_t *psi);
+
+    // 逻辑输入：Cryptol 里视作 a : [256][16]，psi : [128][16]
+    (a,   pa)   <- ptr_to_fresh          "a"   (llvm_array 256 (llvm_int 16));
+    (psi, ppsi) <- ptr_to_fresh_readonly "psi" (llvm_array 128 (llvm_int 16));
+
+    // 调用 C 函数（指针参数）
+    llvm_execute_func [pa, ppsi];
+
+    // 后置条件：内存中的 a 等于 Cryptol 规格计算出来的结果
+    //
+    // 注意这里直接写 {{ mlkem_computNTT a psi }}
+    // 因为我们已经用 cryptol_load 把这个名字导进当前命名空间了
+    llvm_points_to pa (llvm_term {{ m::mlkem_computNTT a psi }});
+
+    // psi 是 const，不要求函数返回后还原什么
+    return ();
+  };
+
+// 5. 顶层 main：加载 bitcode，调用 llvm_verify
+let main : TopLevel () =
+  do {
+    // 用 clang-11 生成的 bitcode：mlkem_ntt.bc
+    m <- llvm_load_module "mlkem_ntt.bc";
+
+    // 证明 MLKEM_ComputNTT 符合规格 mlkem_ntt_spec
+    // []：目前没有要依赖的已验证 spec
+    // false：不是 override 模式
+    llvm_verify m "MLKEM_ComputNTT" [] false mlkem_ntt_spec abc;
+
+    return ();
+  };
