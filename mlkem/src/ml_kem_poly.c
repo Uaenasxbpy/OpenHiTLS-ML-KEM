@@ -14,7 +14,7 @@
  */
 
 #include "hitls_build.h"
-#ifdef HITLS_CRYPTO_MLKEM
+// #ifdef HITLS_CRYPTO_MLKEM
 #include "ml_kem_local.h"
 
 // basecase multiplication: add to polyH but not override it
@@ -121,4 +121,4 @@ void MLKEM_SamplePolyCBD(int16_t *polyF, uint8_t *buf, uint8_t eta)
         }
     }
 }
-#endif
+// #endif

@@ -75,7 +75,7 @@ let main : TopLevel () =
     // 证明 MLKEM_ComputNTT 符合规格 mlkem_ntt_spec
     // []：目前没有要依赖的已验证 spec
     // false：不是 override 模式
-    llvm_verify m "MLKEM_ComputNTT" [] false mlkem_ntt_spec abc;
+    llvm_verify m "MLKEM_ComputNTT" [] false mlkem_ntt_spec yices;
 
     return ();
   };

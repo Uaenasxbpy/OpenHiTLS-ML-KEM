@@ -1,0 +1,377 @@
+module MLKEM_Poly where
+
+// Kyber / ML-KEM 的模数 q
+MLKEM_Q : [32]
+MLKEM_Q = 3329
+
+// 通用符号扩展：把 n 位数按最高位符号扩展到 m 位
+sext : {n, m} (fin n, fin m, m >= n) => [n] -> [m]
+sext x = (repeat (x @ 0)) # x
+
+// 16-bit × 16-bit -> 32-bit 有符号乘法
+// 对应 C 里的：把 int16_t 转成 int32_t 再相乘
+mul16x16_to32 : [16] -> [16] -> [32]
+mul16x16_to32 x y = x32 * y32
+  where
+    x32 : [32]
+    x32 = sext x
+    y32 : [32]
+    y32 = sext y
+
+// 32 位值按“数学意义” mod 3329，然后再表示为 32 位
+mod_q32 : [32] -> [32]
+mod_q32 x = x % MLKEM_Q
+
+// 32 位值按“数学意义” mod 3329，然后压回 16 位
+mod_q16 : [32] -> [16]
+mod_q16 x = drop (x % MLKEM_Q)
+
+//  BaseMulAdd 建模
+
+// 纯函数版：输入旧 polyH[2] 和参数，返回新 polyH[2]
+baseMulAdd :
+     [2][16]  // polyH[0..1]
+  -> [16]     // f0
+  -> [16]     // f1
+  -> [16]     // g0
+  -> [16]     // g1
+  -> [16]     // factor
+  -> [2][16]  // 返回更新后的 polyH
+baseMulAdd polyH f0 f1 g0 g1 factor = [h0', h1']
+  where
+    h0 = polyH @ 0
+    h1 = polyH @ 1
+
+    // -------- polyH[0] 路径 --------
+    term_f0g0 : [32]
+    term_f0g0 = mul16x16_to32 f0 g0
+
+    term_f1g1 : [32]
+    term_f1g1 = mul16x16_to32 f1 g1
+
+    term_f1g1_mod : [32]
+    term_f1g1_mod = mod_q32 term_f1g1
+
+    factor32 : [32]
+    factor32 = sext factor
+
+    term_f1g1_factor : [32]
+    term_f1g1_factor = term_f1g1_mod * factor32
+
+    acc0_32 : [32]
+    acc0_32 = term_f0g0 + term_f1g1_factor
+
+    add0 : [16]
+    add0 = mod_q16 acc0_32
+
+    h0' : [16]
+    h0' = h0 + add0
+
+    // -------- polyH[1] 路径 --------
+    term1_32 : [32]
+    term1_32 = mul16x16_to32 f0 g1 + mul16x16_to32 f1 g0
+
+    add1 : [16]
+    add1 = mod_q16 term1_32
+
+    h1' : [16]
+    h1' = h1 + add1
+
+
+// CircMulAdd 建模 (MLKEM_N = 256)
+type N = 256
+type QuarterN = 64
+
+circMulAdd :
+     [N][16]        // dest
+  -> [N][16]        // src1
+  -> [N][16]        // src2
+  -> [QuarterN][16] // factor[0..63]
+  -> [N][16]        // 返回更新后的 dest
+circMulAdd dest src1 src2 factor = join [ blockOut i | i <- [0 .. 63] ]
+  where
+    // 按每 4 个系数分块：destBlocks[i] = [dest[4i], dest[4i+1], dest[4i+2], dest[4i+3]]
+    destBlocks : [QuarterN][4][16]
+    destBlocks = groupBy`{4} dest
+
+    src1Blocks : [QuarterN][4][16]
+    src1Blocks = groupBy`{4} src1
+
+    src2Blocks : [QuarterN][4][16]
+    src2Blocks = groupBy`{4} src2
+
+    // 处理第 i 块：对应 C 中循环里的两次 BaseMulAdd
+    blockOut : [6] -> [4][16]
+    blockOut i = seg0' # seg1'
+      where
+        blkDest : [4][16]
+        blkDest = destBlocks @ i
+
+        blkSrc1 : [4][16]
+        blkSrc1 = src1Blocks @ i
+
+        blkSrc2 : [4][16]
+        blkSrc2 = src2Blocks @ i
+
+        f : [16]
+        f = factor @ i
+
+        // 前两个系数 dest[4i], dest[4i+1]
+        seg0 : [2][16]
+        seg0 = take`{2} blkDest
+
+        // 后两个系数 dest[4i+2], dest[4i+3]
+        seg1 : [2][16]
+        seg1 = drop`{2} blkDest
+
+        // 第一轮 BaseMulAdd(&dest[4*i], ...)
+        seg0' : [2][16]
+        seg0' =
+          baseMulAdd seg0
+                     (blkSrc1 @ 0)
+                     (blkSrc1 @ 1)
+                     (blkSrc2 @ 0)
+                     (blkSrc2 @ 1)
+                     f
+
+        // -1 * factor[i]
+        negF : [16]
+        negF = - f
+
+        // 第二轮 BaseMulAdd(&dest[4*i+2], ... , -factor[i])
+        seg1' : [2][16]
+        seg1' =
+          baseMulAdd seg1
+                     (blkSrc1 @ 2)
+                     (blkSrc1 @ 3)
+                     (blkSrc2 @ 2)
+                     (blkSrc2 @ 3)
+                     negF
+
+
+// 建模PolyReduce函数
+import BarrettReduction as BR
+// type N = 256
+polyReduce :[N][16] -> [N][16]
+polyReduce poly = [ BR::barrett_reduction x | x <- poly ]
+
+// 建模MLKEM_MatrixMulAdd函数
+// rowMulAdd：对应 C 里内层 j 循环，把第 i 行 matrix[i][*] 和 polyVec[*]
+// 作用到当前输出多项式 out_i 上：out_i += sum_j CircMulAdd(...)
+// matrixRow  : matrix[i][0..k-1]
+// vec        : polyVec[0..k-1]
+// out0       : polyVecOut[i] 初始值
+rowMulAdd :
+  {k} (fin k) =>
+     [k][N][16]    // matrixRow[i][j]
+  -> [k][N][16]    // polyVec[j]
+  -> [N][16]       // 当前 out_i
+  -> [QuarterN][16]// 传给 CircMulAdd 的 factor 段
+  -> [N][16]       // 更新后的 out_i
+rowMulAdd matrixRow vec out0 factorCirc =
+  foldl step out0 (zip matrixRow vec)
+  where
+    step : [N][16] -> ([N][16], [N][16]) -> [N][16]
+    step acc (m_j, v_j) = circMulAdd acc m_j v_j factorCirc
+
+
+// 对应 MLKEM_MatrixMulAdd：
+// 这里我们建模成：
+//   输入：k × k 矩阵（只用前 k×k 部分）、k 维 polyVec、k 维 polyVecOut 起始值、factor[128]
+//   输出：更新后的 k 维 polyVecOut
+matrixMulAdd :
+  {k} (fin k, k >= 1) =>
+     [k][k][N][16]   // matrix[i][j]
+  -> [k][N][16]      // polyVec[j]
+  -> [k][N][16]      // polyVecOut 初值
+  -> [128][16]       // factor（长度 128 的表）
+  -> [k][N][16]      // 返回更新后的 polyVecOut
+matrixMulAdd matrix vec out factor = 
+  [ polyReduce (rowMulAdd (matrix @ i) vec (out @ i) factorCirc)
+  | i <- [0 .. k - 1]
+  ]
+  where
+    // C 里传的是 factor + MLKEM_N_HALF/2
+    // MLKEM_N_HALF = 128，所以这里取 factor[64..127] 这一段
+    factorCirc : [QuarterN][16]
+    factorCirc = drop`{QuarterN} factor
+
+
+// 建模MLKEM_TransposeMatrixMulAdd函数
+// 和 matrixMulAdd 类似，只是矩阵转置了
+
+
+matrixTransposeMulAdd :
+  {k} (fin k, k >= 1) =>
+     [k][k][N][16]   // matrix[i][j]
+  -> [k][N][16]      // polyVec[j]
+  -> [k][N][16]      // polyVecOut 初值
+  -> [128][16]       // factor（长度 128）
+  -> [k][N][16]      // 返回更新后的 polyVecOut
+matrixTransposeMulAdd matrix vec out factor =
+  [ polyReduce (rowAcc i (out @ i)) | i <- [0 .. k - 1] ]
+  where
+    // C 里传的是 factor + MLKEM_N_HALF/2
+    // MLKEM_N_HALF = 128，所以取 factor[64..127]
+    factorCirc : [QuarterN][16]
+    factorCirc = drop`{QuarterN} factor
+
+    // 对第 i 个输出多项式：遍历 j=0..k-1，列访问 matrix[j][i]
+    rowAcc i acc0 = foldl step acc0 [0 .. k - 1]
+      where
+        step acc j = circMulAdd acc (matrix @ j @ i) (vec @ j) factorCirc
+
+//  VectorInnerProductAdd 建模
+//  对应：polyOut += Σ_i CircMul(polyVec1[i], polyVec2[i])
+
+vectorInnerProductAdd :
+  {k} (fin k) =>
+     [k][N][16]    // polyVec1[i]
+  -> [k][N][16]    // polyVec2[i]
+  -> [N][16]       // polyOut 初始值
+  -> [128][16]     // factor（长度 128）
+  -> [N][16]       // 返回更新后的 polyOut
+vectorInnerProductAdd vec1 vec2 polyOut factor = foldl step polyOut (zip vec1 vec2)
+  where
+    // C 里传的是 factor + MLKEM_N_HALF/2
+    // MLKEM_N_HALF = 128，所以取 factor[64..127]
+    factorCirc : [QuarterN][16]
+    factorCirc = drop`{QuarterN} factor
+
+    step : [N][16] -> ([N][16], [N][16]) -> [N][16]
+    step acc (p1, p2) = circMulAdd acc p1 p2 factorCirc
+
+
+//  CBD 采样建模 (eta = 3 / 2)
+
+// 辅助：8-bit 扩展到 32-bit / 16-bit（零扩展）
+extend8to32 : [8] -> [32]
+extend8to32 b = (0 : [24]) # b
+
+extend8to16 : [8] -> [16]
+extend8to16 b = (0 : [8]) # b
+
+// 辅助：32 位按位与
+bitAnd32 : [32] -> [32] -> [32]
+bitAnd32 x y = [ (x @ i) && (y @ i) | i <- [0 .. 31] ]
+
+// 辅助：16 位按位与
+bitAnd16 : [16] -> [16] -> [16]
+bitAnd16 x y = [ (x @ i) && (y @ i) | i <- [0 .. 15] ]
+
+// 从 32 位中取最低 2 bit，零扩展到 16 位（0..3）
+low2to16_from32 : [32] -> [16]
+low2to16_from32 x = (0 : [14]) # drop`{30} x
+
+// 从 16 位中取最低 2 bit，零扩展到 16 位（0..3）
+low2to16_from16 : [16] -> [16]
+low2to16_from16 x = (0 : [14]) # drop`{14} x
+
+// 采样多项式（eta = 3）
+// buf 长度：3 * (N/4) = 192 bytes
+polyCBD_eta3 : [3 * QuarterN][8] -> [N][16]
+polyCBD_eta3 buf = join [ blockCoeffs i | i <- [0 .. QuarterN - 1] ]
+  where
+    mask32 : [32]
+    mask32 = 0x00249249
+
+    // 每个 i 产生 4 个系数 polyF[4*i .. 4*i+3]
+    blockCoeffs i = [ coeff i j | j <- [0 .. 3] ]
+
+    coeff i j = coef
+      where
+        // 构造 temp（uint32_t）
+        // temp = buf[3*i] + buf[3*i+1] << 8 + buf[3*i+2] << 16
+        b0 : [32]
+        b0 = extend8to32 (buf @ (3 * i))
+        b1 : [32]
+        b1 = extend8to32 (buf @ (3 * i + 1))
+        b2 : [32]
+        b2 = extend8to32 (buf @ (3 * i + 2))
+
+        temp : [32]
+        temp = b0 + (b1 << 8) + (b2 << 16)
+
+        t1_0 : [32]
+        t1_0 = bitAnd32 temp mask32
+
+        t1_1 : [32]
+        t1_1 = bitAnd32 (temp >> 1) mask32
+
+        t1_2 : [32]
+        t1_2 = bitAnd32 (temp >> 2) mask32
+
+        t1 : [32]
+        t1 = t1_0 + t1_1 + t1_2
+
+        // a = (t1 >> (6 * j)) & 0x3  （低两位）
+        shiftedA : [32]
+        shiftedA = t1 >> (6 * j)
+        a16 : [16]
+        a16 = low2to16_from32 shiftedA
+
+        // b = (t1 >> (6 * j + 3)) & 0x3
+        shiftedB : [32]
+        shiftedB = t1 >> (6 * j + 3)
+        b16 : [16]
+        b16 = low2to16_from32 shiftedB
+
+        // polyF[4*i + j] = a - b
+        coef : [16]
+        coef = a16 - b16
+
+// 采样多项式（eta = 2）
+// buf 长度：2 * (N/4) = 128 bytes
+polyCBD_eta2 : [2 * QuarterN][8] -> [N][16]
+polyCBD_eta2 buf = join [ blockCoeffs i | i <- [0 .. QuarterN - 1] ]
+  where
+    mask16 : [16]
+    mask16 = 0x5555
+
+    blockCoeffs i = [ coeff i j | j <- [0 .. 3] ]
+
+    coeff i j = coef
+      where
+        // temp 是 uint16_t
+        // temp = buf[2*i] + buf[2*i+1] << 8
+        b0 : [16]
+        b0 = extend8to16 (buf @ (2 * i))
+        b1 : [16]
+        b1 = extend8to16 (buf @ (2 * i + 1))
+
+        temp : [16]
+        temp = b0 + (b1 << 8)
+
+        t1_0 : [16]
+        t1_0 = bitAnd16 temp mask16
+
+        t1_1 : [16]
+        t1_1 = bitAnd16 (temp >> 1) mask16
+
+        t1 : [16]
+        t1 = t1_0 + t1_1
+
+        // a = (t1 >> (4 * j)) & 0x3
+        shiftedA : [16]
+        shiftedA = t1 >> (4 * j)
+        a16 : [16]
+        a16 = low2to16_from16 shiftedA
+
+        // b = (t1 >> (4 * j + 2)) & 0x3
+        shiftedB : [16]
+        shiftedB = t1 >> (4 * j + 2)
+        b16 : [16]
+        b16 = low2to16_from16 shiftedB
+
+        coef : [16]
+        coef = a16 - b16
+
+// 统一封装：根据 eta 选择对应的 CBD 分支
+// 这里 buf 取最长情况：3 * QuarterN = 192 bytes
+samplePolyCBD : [3 * QuarterN][8] -> [8] -> [N][16]
+samplePolyCBD buf eta =
+  if eta == (3 : [8])
+    // eta = 3, 直接用全部 192 bytes
+    then polyCBD_eta3 buf
+    // eta = 2, 只用前 2 * QuarterN = 128 bytes
+    else polyCBD_eta2 (take`{2 * QuarterN} buf)
