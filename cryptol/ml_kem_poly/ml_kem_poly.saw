@@ -1,0 +1,82 @@
+// 1. 加载依赖和模块（无修改）
+enable_experimental;
+import "BarrettReduction.cry";
+import "ml_kem_poly.cry" as m;  // 明确导入模块 m
+
+m <- llvm_load_module "ml_kem_poly.bc";  // 加载 .bc 文件
+
+// 常量定义（无修改）
+let MLKEM_N = 256;
+let MLKEM_QUARTER_N = 64;
+let MLKEM_K_MAX = 4;
+let llvm_int16 = llvm_int 16;
+let llvm_int16_array_n = llvm_array MLKEM_N llvm_int16;
+let llvm_int16_array_qn = llvm_array MLKEM_QUARTER_N llvm_int16;
+
+// ==============================================================================
+// 2. 验证 PolyReduce 函数（无修改）
+// ============================================================================== 
+let polyReduce_spec = do {
+  poly_ptr <- llvm_alloc llvm_int16_array_n;
+  poly_sym <- llvm_fresh_var "poly" llvm_int16_array_n;
+  llvm_points_to poly_ptr (llvm_term poly_sym);
+
+  llvm_execute_func [poly_ptr];
+
+  let expected = {{ m::polyReduce poly_sym }};  // 使用 m 命名空间来调用 polyReduce
+  llvm_points_to poly_ptr (llvm_term expected);
+};
+
+polyReduce_thm <- llvm_verify m "PolyReduce" [] false polyReduce_spec abc;
+print "PolyReduce 验证完成！";
+
+// ==============================================================================
+// 3. 验证 BaseMulAdd 函数（无修改）
+// ============================================================================== 
+let baseMulAdd_spec = do {
+  polyH_ptr <- llvm_alloc (llvm_array 2 llvm_int16);
+  polyH_init <- llvm_fresh_var "polyH_init" (llvm_array 2 llvm_int16);
+  f0 <- llvm_fresh_var "f0" llvm_int16;
+  f1 <- llvm_fresh_var "f1" llvm_int16;
+  g0 <- llvm_fresh_var "g0" llvm_int16;
+  g1 <- llvm_fresh_var "g1" llvm_int16;
+  factor <- llvm_fresh_var "factor" llvm_int16;
+
+  llvm_points_to polyH_ptr (llvm_term polyH_init);
+
+  llvm_execute_func [polyH_ptr, llvm_term f0, llvm_term f1, llvm_term g0, llvm_term g1, llvm_term factor];
+
+  let expected = {{ m::baseMulAdd polyH_init f0 f1 g0 g1 factor }};  // 使用 m 命名空间来调用 baseMulAdd
+  llvm_points_to polyH_ptr (llvm_term expected);
+};
+
+baseMulAdd_thm <- llvm_verify m "BaseMulAdd" [] false baseMulAdd_spec abc;
+print "BaseMulAdd 验证完成！";
+
+// ==============================================================================
+// 4. 验证 CircMulAdd 函数（无修改）
+// ============================================================================== 
+let circMulAdd_spec = do {
+  dest_ptr <- llvm_alloc llvm_int16_array_n;
+  src1_ptr <- llvm_alloc llvm_int16_array_n;
+  src2_ptr <- llvm_alloc llvm_int16_array_n;
+  factor_ptr <- llvm_alloc llvm_int16_array_qn;
+
+  dest_init <- llvm_fresh_var "dest_init" llvm_int16_array_n;
+  src1 <- llvm_fresh_var "src1" llvm_int16_array_n;
+  src2 <- llvm_fresh_var "src2" llvm_int16_array_n;
+  factor <- llvm_fresh_var "factor" llvm_int16_array_qn;
+
+  llvm_points_to dest_ptr (llvm_term dest_init);
+  llvm_points_to src1_ptr (llvm_term src1);
+  llvm_points_to src2_ptr (llvm_term src2);
+  llvm_points_to factor_ptr (llvm_term factor);
+
+  llvm_execute_func [dest_ptr, src1_ptr, src2_ptr, factor_ptr];
+
+  let expected = {{ m::circMulAdd dest_init src1 src2 factor }};  // 使用 m 命名空间来调用 circMulAdd
+  llvm_points_to dest_ptr (llvm_term expected);
+};
+
+circMulAdd_thm <- llvm_verify m "CircMulAdd" [baseMulAdd_thm] false circMulAdd_spec abc;
+print "CircMulAdd 验证完成！";
