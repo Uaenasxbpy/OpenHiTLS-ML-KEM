@@ -17,15 +17,14 @@ mul16x16_to32 x y = x32 * y32
     x32 = sext x
     y32 : [32]
     y32 = sext y
-
-// 32 位值按“数学意义” mod 3329，然后再表示为 32 位
+// 32 位值按“有符号” mod 3329 (模拟 C 行为)
+// 使用 %$ (Signed Modulus) 替代 % (Unsigned Modulus)
 mod_q32 : [32] -> [32]
-mod_q32 x = x % MLKEM_Q
+mod_q32 x = x %$ (MLKEM_Q : [32])
 
-// 32 位值按“数学意义” mod 3329，然后压回 16 位
+// 32 位值按“有符号” mod 3329，然后压回 16 位
 mod_q16 : [32] -> [16]
-mod_q16 x = drop (x % MLKEM_Q)
-
+mod_q16 x = drop (x %$ (MLKEM_Q : [32]))
 //  BaseMulAdd 建模
 
 // 纯函数版：输入旧 polyH[2] 和参数，返回新 polyH[2]

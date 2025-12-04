@@ -13,12 +13,6 @@ static inline int16_t BarrettReduction(int16_t a) {
     return a - t;
 }
 
-static inline int16_t MontgomeryReduction(int32_t a) {
-    int16_t t = (int16_t)a * MLKEM_Q_INV_BETA;
-    t = (a - (int32_t)t * MLKEM_Q) >> 16;
-    return t;
-}
-
 // basecase multiplication: add to polyH but not override it
 static void BaseMulAdd(int16_t polyH[2], const int16_t f0, const int16_t f1,
                        const int16_t g0, const int16_t g1, const int16_t factor)
