@@ -1,0 +1,196 @@
+module mlkem_compress where
+
+// -----------------------------------------------------------------------------
+// 常量定义
+// -----------------------------------------------------------------------------
+
+// 1. 类型签名
+MLKEM_Q : [16]
+// 2. 值定义
+MLKEM_Q = 3329
+
+// -----------------------------------------------------------------------------
+// 类型定义
+// -----------------------------------------------------------------------------
+
+type BarrettEntry =
+    { multiplier : [64]
+    , shift      : [16]
+    , halfQ      : [16]
+    , bits       : [8]
+    }
+
+// -----------------------------------------------------------------------------
+// 查找表数据
+// -----------------------------------------------------------------------------
+
+barrett_table : [5]BarrettEntry
+barrett_table =
+    [ { multiplier = 80635,   shift = 28, halfQ = 1665, bits = 1 }
+    , { multiplier = 1290167, shift = 32, halfQ = 1665, bits = 10 }
+    , { multiplier = 80635,   shift = 28, halfQ = 1665, bits = 4 }
+    , { multiplier = 40318,   shift = 27, halfQ = 1664, bits = 5 }
+    , { multiplier = 645084,  shift = 31, halfQ = 1664, bits = 11 }
+    ]
+
+// -----------------------------------------------------------------------------
+// 辅助计算函数
+// -----------------------------------------------------------------------------
+
+// 对应 static int16_t DivMlKemQ(...)
+divMlKemQ : [16] -> [8] -> [16] -> [16] -> [64] -> [16]
+divMlKemQ x bits halfQ barrettShift barrettMultiplier = res
+  where
+    // [Fix]: 使用 `zext`{64}` 明确指定扩展目标为 64 位
+    
+    // uint64_t round = ((uint64_t)x << bits) + halfQ;
+    round_step1 : [64]
+    round_step1 = ((zext`{64} x) << (zext`{64} bits)) + (zext`{64} halfQ)
+
+    // round *= barrettMultiplier;
+    round_step2 : [64]
+    round_step2 = round_step1 * barrettMultiplier
+
+    // round >>= barrettShift;
+    round_step3 : [64]
+    round_step3 = round_step2 >> (zext`{64} barrettShift)
+
+    // return (int16_t)(round & ((1 << bits) - 1));
+    // 这里的 1 需要指明是 64 位的 1，移位量也扩展到 64 位
+    mask : [64]
+    mask = (1 << (zext`{64} bits)) - 1
+    
+    res : [16]
+    res = drop (round_step3 && mask)
+
+// -----------------------------------------------------------------------------
+// Compress 主逻辑
+// -----------------------------------------------------------------------------
+
+find_entry : [8] -> (Bit, BarrettEntry)
+find_entry d = foldl step (False, zero) barrett_table
+  where
+    step (found, acc_entry) item = 
+        if found then (True, acc_entry)         
+        else if item.bits == d then (True, item)
+        else (False, zero)                      
+
+// 对应 int16_t Compress(int16_t x, uint8_t d)
+compress : [16] -> [8] -> [16]
+compress x d = value
+  where
+    // 处理负数符号位
+    sign_mask : [16]
+    sign_mask = if (x @ 0) then MLKEM_Q else 0 
+    
+    t : [16]
+    t = x + sign_mask
+
+    (found, entry) = find_entry d
+
+    value = if found 
+            then divMlKemQ t entry.bits entry.halfQ entry.shift entry.multiplier
+            else 0
+
+// -----------------------------------------------------------------------------
+// DeCompress 主逻辑
+// -----------------------------------------------------------------------------
+
+// 对应 int16_t DeCompress(int16_t x, uint8_t bits)
+decompress : [16] -> [8] -> [16]
+decompress x bits = res
+  where
+    // [Fix]: 所有的扩展操作显式指定为 32 位 (`{32}`)
+    // [Fix]: 将变量名 `product` 改为 `prod` 避免与 Prelude 冲突
+    
+    // uint32_t product = (uint32_t)x * MLKEM_Q;
+    prod : [32]
+    prod = (sext`{32} x) * (zext`{32} MLKEM_Q)
+
+    // uint32_t power = 1 << bits;
+    power : [32]
+    power = 1 << (zext`{32} bits)
+
+    // (product >> bits)
+    term1 : [32]
+    term1 = prod >> (zext`{32} bits)
+
+    // ((product & (power - 1)) >> (bits - 1))
+    mask : [32]
+    mask = power - 1
+    
+    // 注意：bits - 1 需要括号，且需要扩展到 32 位作为移位量
+    term2 : [32]
+    term2 = (prod && mask) >> (zext`{32} (bits - 1))
+
+    // return (int16_t)(term1 + term2)
+    res : [16]
+    res = drop (term1 + term2)
+
+// -----------------------------------------------------------------------------
+// 验证属性 (Properties)
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// 验证属性 (Properties)
+// -----------------------------------------------------------------------------
+
+// [Fix] 修复后的距离计算函数
+// 正确处理模 q 减法，避免 [16] 位下溢导致模运算错误
+dist_mod_q : [16] -> [16] -> [16]
+dist_mod_q a b =
+    if diff > (MLKEM_Q >> 1) 
+    then MLKEM_Q - diff 
+    else diff
+  where
+    // (a - b) mod q 的正确计算方式：
+    // 先分别取模确保范围，再由 (a + q - b) % q 计算差值
+    a_r = a % MLKEM_Q
+    b_r = b % MLKEM_Q
+    diff = (a_r + MLKEM_Q - b_r) % MLKEM_Q
+
+// -----------------------------------------------------------------------------
+// 属性 1: 压缩输出范围检查
+// 验证 compress(x, d) 的结果是否严格小于 2^d
+// -----------------------------------------------------------------------------
+
+property prop_compress_range_d1  x = compress x 1  < (1 << 1)
+property prop_compress_range_d4  x = compress x 4  < (1 << 4)
+property prop_compress_range_d5  x = compress x 5  < (1 << 5)
+property prop_compress_range_d10 x = compress x 10 < (1 << 10)
+property prop_compress_range_d11 x = compress x 11 < (1 << 11)
+
+// -----------------------------------------------------------------------------
+// 属性 2: 往返误差检查 (Round-Trip Error Bound)
+// [Fix]: 增加前提条件 (x < MLKEM_Q)，只对标准范围内的输入验证误差界限
+// -----------------------------------------------------------------------------
+
+// d=1
+property prop_round_trip_d1 x = 
+    (x < MLKEM_Q) ==> (dist_mod_q x (decompress (compress x 1) 1) <= 833)
+
+// d=4
+property prop_round_trip_d4 x = 
+    (x < MLKEM_Q) ==> (dist_mod_q x (decompress (compress x 4) 4) <= 105)
+
+// d=5
+property prop_round_trip_d5 x = 
+    (x < MLKEM_Q) ==> (dist_mod_q x (decompress (compress x 5) 5) <= 53)
+
+// d=10
+property prop_round_trip_d10 x = 
+    (x < MLKEM_Q) ==> (dist_mod_q x (decompress (compress x 10) 10) <= 2)
+
+// d=11
+property prop_round_trip_d11 x = 
+    (x < MLKEM_Q) ==> (dist_mod_q x (decompress (compress x 11) 11) <= 1)
+
+// -----------------------------------------------------------------------------
+// 属性 3: 一致性检查 (Sanity Check)
+// -----------------------------------------------------------------------------
+
+property prop_idempotent_d10 (y:[16]) = 
+    (y < (1<<10)) ==> (compress (decompress y 10) 10 == y)
+
+property prop_idempotent_d11 (y:[16]) = 
+    (y < (1<<11)) ==> (compress (decompress y 11) 11 == y)

@@ -13,20 +13,20 @@ let llvm_int16 = llvm_int 16;
 let llvm_int16_array_n = llvm_array MLKEM_N llvm_int16;
 let llvm_int16_array_qn = llvm_array MLKEM_QUARTER_N llvm_int16;
 
-// // 2. 验证 PolyReduce 函数
-// let polyReduce_spec = do {
-//   poly_ptr <- llvm_alloc llvm_int16_array_n;
-//   poly_sym <- llvm_fresh_var "poly" llvm_int16_array_n;
-//   llvm_points_to poly_ptr (llvm_term poly_sym);
+// 2. 验证 PolyReduce 函数
+let polyReduce_spec = do {
+  poly_ptr <- llvm_alloc llvm_int16_array_n;
+  poly_sym <- llvm_fresh_var "poly" llvm_int16_array_n;
+  llvm_points_to poly_ptr (llvm_term poly_sym);
 
-//   llvm_execute_func [poly_ptr];
+  llvm_execute_func [poly_ptr];
 
-//   let expected = {{ m::polyReduce poly_sym }};  // 使用 m 命名空间来调用 polyReduce
-//   llvm_points_to poly_ptr (llvm_term expected);
-// };
+  let expected = {{ m::polyReduce poly_sym }};  // 使用 m 命名空间来调用 polyReduce
+  llvm_points_to poly_ptr (llvm_term expected);
+};
 
-// polyReduce_thm <- llvm_verify m "PolyReduce" [] false polyReduce_spec abc;
-// print "PolyReduce 验证完成！";
+polyReduce_thm <- llvm_verify m "PolyReduce" [] false polyReduce_spec abc;
+print "PolyReduce 验证完成！";
 
 // 3. 验证 BaseMulAdd 函数
 let baseMulAdd_spec = do {
@@ -85,315 +85,352 @@ let circMulAdd_spec = do {
 circMulAdd_thm <- llvm_verify m "CircMulAdd" [baseMulAdd_thm] false circMulAdd_spec abc;
 print "CircMulAdd 验证完成！";
 
-// =================配置参数=================
-// let k = 3;             // ML-KEM-768
-// let MLKEM_K_MAX = 4;   // 通常 C 代码中定义的常数，用于矩阵跨度
-// let N = 256;
-// let QN = 64;           // Quarter N
+////////////////////////////////////////////////////////////////////////////////
+// 5. 辅助函数定义：处理 Matrix 和 PolyVec 的内存分配与 Term 构建
+////////////////////////////////////////////////////////////////////////////////
 
-// =================辅助函数=================
+// 辅助函数：将 [Term] 列表转换为 Cryptol 的 Sequence Term
+// 相当于 Cryptol 的 [t1, t2, ...]
+let list_term_seq ts = list_term ts;
 
-// 1. 范围约束 Lambda (复用之前的逻辑)
-let safe_bound = {{ \x -> (x >$ -4096) /\ (x <$ 4096) }};
-
-// 2. 分配 PolyVec (int16_t **polyVec)
-// 返回: (指针数组的基地址, 符号变量列表)
-let setup_polyvec name k = do {
-    // 分配存放指针的数组: int16_t *arr[k]
-    ptr_arr <- llvm_alloc (llvm_array k llvm_ptr);
+// 辅助函数：分配 PolyVec (数组指针 int16_t**)
+// 返回 (pointer, [Term])，其中 [Term] 是每个多项式的 fresh var 列表
+let setup_poly_vec k name_prefix = do {
+    // 分配指针数组 (int16_t *vec[k])
+    vec_ptr_arr <- llvm_alloc (llvm_array k (llvm_pointer llvm_int16_array_n));
     
-    // 遍历分配每一个多项式
-    vars <- for [0 .. k-1] (\i -> do {
-        // 分配具体数据 int16_t[N]
-        data_ptr <- llvm_alloc llvm_int16_array_n;
-        // 创建符号变量
-        var <- llvm_fresh_var (str_concat name (show i)) llvm_int16_array_n;
-        // 添加范围约束 (必须！否则 CircMulAdd 会失败)
-        llvm_precond {{ all safe_bound var }};
-        
-        // 绑定数据
-        llvm_points_to data_ptr (llvm_term var);
-        // 让指针数组指向数据: arr[i] = data_ptr
-        llvm_points_to (llvm_elem ptr_arr i) data_ptr;
-        
-        return var;
+    // 为每个指针分配多项式内存并初始化
+    vec_terms <- for (map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }})) (\i -> do {
+        p <- llvm_alloc llvm_int16_array_n;
+        v <- llvm_fresh_var (str_concat name_prefix (show i)) llvm_int16_array_n;
+        // 添加数值范围约束，防止溢出
+        llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) v }};
+        llvm_points_to p (llvm_term v);
+        llvm_points_to (llvm_elem vec_ptr_arr i) p;
+        return v;
     });
     
-    return (ptr_arr, vars);
+    return (vec_ptr_arr, vec_terms);
 };
 
-// 3. 分配 Matrix (int16_t **matrix)
-// 注意 C 代码中的 stride: matrix + i * MLKEM_K_MAX
-let setup_matrix name k = do {
-    // 分配足够大的指针数组: int16_t *mat[k * MLKEM_K_MAX]
-    // 即使只用前 k 列，内存布局通常是固定的
-    ptr_arr <- llvm_alloc (llvm_array (k * MLKEM_K_MAX) llvm_ptr);
+// 辅助函数：分配 Matrix (数组指针 int16_t**)
+// 返回 (pointer, Term)，其中 Term 是 Cryptol 的 [k][k][N][16]
+let setup_matrix k = do {
+    let stride = 4; // MLKEM_K_MAX
+    let flat_size = eval_int {{ `k * `stride : [32] }};
     
-    // 嵌套循环分配 k*k 个多项式
-    // 返回的是 [k][k][MLKEM_N][16] 形式的 Cryptol 变量
-    rows <- for [0 .. k-1] (\i -> do {
-        cols <- for [0 .. k-1] (\j -> do {
-            // 计算扁平化索引: i * MLKEM_K_MAX + j
-            let idx = i * MLKEM_K_MAX + j;
+    // 1. 定义循环索引列表 [0, 1, ... k-1]
+    // 修复点：使用 Cryptol 生成序列并转为 SAW Int 列表
+    let indices = map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }});
+
+    // 分配指针数组
+    mtx_ptr_arr <- llvm_alloc (llvm_array flat_size (llvm_pointer llvm_int16_array_n));
+    
+    // 生成 k x k 的矩阵数据
+    // 2. 修复点：使用 indices 替换原来的 [0 .. (...)]
+    rows <- for indices (\i -> do {
+        cols <- for indices (\j -> do {
+            p <- llvm_alloc llvm_int16_array_n;
+            v <- llvm_fresh_var (str_concat "mat_" (str_concat (show i) (show j))) llvm_int16_array_n;
+            llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) v }};
+            llvm_points_to p (llvm_term v);
             
-            data_ptr <- llvm_alloc llvm_int16_array_n;
-            var <- llvm_fresh_var (str_concat name (str_concat (show i) (show j))) llvm_int16_array_n;
-            
-            // 添加范围约束
-            llvm_precond {{ all safe_bound var }};
-            
-            llvm_points_to data_ptr (llvm_term var);
-            llvm_points_to (llvm_elem ptr_arr idx) data_ptr;
-            
-            return var;
+            // 计算在扁平数组中的索引：i * stride + j
+            let idx = eval_int {{ `i * `stride + `j : [32] }};
+            llvm_points_to (llvm_elem mtx_ptr_arr idx) p;
+            return v;
         });
         return cols;
     });
     
-    return (ptr_arr, rows);
+    // 将 rows ([[Term]]) 转换为 Cryptol Term [k][k][N][16]
+    let row_terms = map list_term_seq rows;
+    let mat_term = list_term_seq row_terms;
+    
+    return (mtx_ptr_arr, mat_term);
 };
 
-// ==========================================
-// 0. 基础配置与辅助函数
-// ==========================================
 
-// 定义安全范围约束 (避免 BaseMulAdd 契约失败)
-// 必须使用有符号比较 >$ 和 <$
-let safe_bound = {{ \x -> (x >$ -4096) /\ (x <$ 4096) }};
+// 6. 验证 PolyReduce (之前被注释的部分)
+let polyReduce_spec = do {
+    poly_ptr <- llvm_alloc llvm_int16_array_n;
+    poly_sym <- llvm_fresh_var "poly" llvm_int16_array_n;
+    llvm_points_to poly_ptr (llvm_term poly_sym);
 
-// 辅助：分配 PolyVec (int16_t *polyVec[k])
-// 返回 (指针数组基地址, Cryptol符号变量列表)
-let setup_polyvec name k = do {
-    // 分配指针数组: int16_t *arr[k]
-    ptr_arr <- llvm_alloc (llvm_array k llvm_ptr);
+    llvm_execute_func [poly_ptr];
+
+    let expected = {{ m::polyReduce poly_sym }};
+    llvm_points_to poly_ptr (llvm_term expected);
+};
+
+// 只有当 PolyReduce 验证通过，才能作为后续 Matrix 函数的 override
+polyReduce_thm <- llvm_verify m "PolyReduce" [] false polyReduce_spec abc;
+print "PolyReduce 验证完成！";
+
+// 7. 验证 MLKEM_MatrixMulAdd
+// 定义通用的 MatrixMulAdd 规格，参数化 k
+let matrixMulAdd_spec k = do {
+    // 1. Setup Matrix (k x k)
+    (matrix_ptr, matrix_term) <- setup_matrix k;
     
-    // 遍历生成 k 个多项式
-    vars <- for [0 .. k-1] (\i -> do {
-        // 分配具体数据 int16_t[N]
-        data_ptr <- llvm_alloc (llvm_array MLKEM_N llvm_int16);
+    // 2. Setup PolyVec (k)
+    (vec_ptr, vec_terms) <- setup_poly_vec k "vec_";
+    let vec_term = list_term_seq vec_terms;
+    
+    // 3. Setup PolyVecOut (k) - 这是一个累加操作，所以需要初始值
+    (out_ptr, out_terms) <- setup_poly_vec k "out_";
+    let out_term = list_term_seq out_terms;
+    
+    // 4. Setup Factor (128 coefficients)
+    // C code uses `factor + MLKEM_N_HALF / 2`, which is offset 64.
+    // However, the function signature takes `factor` pointer. 
+    // Usually in Kyber implementations, the passed pointer points to the start of the required 64 coeffs.
+    // Wait, C code: `CircMulAdd(..., factor + 64)`.
+    // The argument to MLKEM_MatrixMulAdd is `factor`.
+    // Cryptol model `matrixMulAdd` takes 128 coeffs and drops 64. 
+    // To align SAW spec with C signature:
+    // C expects a pointer to an array (likely size 128 based on internal offset usage).
+    factor_ptr <- llvm_alloc (llvm_array 128 llvm_int16);
+    factor_val <- llvm_fresh_var "factor" (llvm_array 128 llvm_int16);
+    llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) factor_val }};
+    llvm_points_to factor_ptr (llvm_term factor_val);
+
+    // --- Execute ---
+    llvm_execute_func [
+        llvm_term {{ `k : [8] }},  // uint8_t k
+        matrix_ptr,               // int16_t **matrix
+        vec_ptr,                  // int16_t **polyVec
+        out_ptr,                  // int16_t **polyVecOut
+        factor_ptr                // const int16_t *factor
+    ];
+    
+    // --- Verify ---
+    // Cryptol: m::matrixMulAdd matrix vec out factor
+    let expected = {{ m::matrixMulAdd matrix_term vec_term out_term factor_val }};
+    
+    // Check that polyVecOut[i] points to expected[i]
+    // expected is a Term [k][N][16], we need to decompose it to check individual pointers
+    for (map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }})) (\i -> do {
+        let p = llvm_elem out_ptr i; // get pointer at out_ptr[i]
+        // In SAW, pointer to pointer: we need to dereference out_ptr to get the pointer to the array
+        // Wait, llvm_elem gives the address of the slot in the array of pointers.
+        // We verified above that out_ptr points to an array of pointers.
+        // The helper `setup_poly_vec` set: llvm_points_to (llvm_elem out_ptr i) p_poly
+        // SAW tracks this. We just need to assert the content of the memory pointed to by that pointer.
         
-        // 生成符号变量
-        let var_name = str_concat name (str_concat "_" (show i));
-        var <- llvm_fresh_var var_name (llvm_array MLKEM_N llvm_int16);
+        // We need to re-traverse the setup structure or capture the pointers in setup_poly_vec.
+        // Since `llvm_points_to` post-condition matches the *structure* of memory.
         
-        // === 关键：添加范围约束 ===
-        llvm_precond {{ all safe_bound var }};
+        // Simpler approach for Post-condition with pointers:
+        // Use `llvm_points_to` on the `out_ptr` array elements again?
+        // No, we need to say "The array pointed to by out_ptr[i] contains expected[i]".
+        // SAW's `llvm_points_to` on `out_ptr` describes the array of pointers.
+        // We need to describe the *deep* memory.
         
-        // 绑定数据与指针
-        llvm_points_to data_ptr (llvm_term var);
-        llvm_points_to (llvm_elem ptr_arr i) data_ptr;
+        // Let's rely on SAW's ability to match symbolic variables if we reconstruct the points-to graph.
+        // But `expected` is a computed term.
+        // We iterate and assert:
         
-        return var;
+        // Get the pointer stored at out_ptr[i]
+        // Since we allocated it in setup, we technically need reference to the *value* of the pointer.
+        // However, in SAW post-conditions, we describe the state of memory.
+        // The pointer values (addresses) haven't changed, only the content they point to.
+        // But we don't have the explicit pointer variables here easily unless we return them from setup.
+        // Let's assume SAW needs the pointer values.
+        
+        // To fix this, let's modify `setup_poly_vec` to return the list of pointers too, 
+        // or just re-read the pointer from the setup? No, cannot read in spec generation.
+        
+        // **Modification**: Use a "points-to" check that re-uses the pointers allocated in Pre-condition.
+        // This is implicit if we use the return values from `setup_poly_vec`.
+        // Let's modify `setup_poly_vec` to return (ptr_arr, [poly_ptrs], [terms]).
+        
+        // Actually, easier inline fix:
+        // We know `setup_poly_vec` allocates `p` and links it. 
+        // We can't easily grab `p` back without returning it.
+        // Let's refactor `setup_poly_vec` locally inside `matrixMulAdd_spec` is messy.
+        // I will trust the user understands I need to modify `setup_poly_vec` signature slightly 
+        // or iterate `vec_terms` logic again.
+        
+        // Best practice: The helper should return the list of pointers to the polynomial arrays.
+        return (); 
     });
     
-    return (ptr_arr, vars);
-};
-
-// 辅助：分配 Matrix (int16_t *matrix[])
-// 注意：C 代码中 stride 是 MLKEM_K_MAX (4)
-let setup_matrix name k = do {
-    // 即使 k=2, 内存也是按 stride=4 分配或访问的 (取决于调用者的内存池，但访问逻辑是固定的)
-    // 我们分配足够的空间来容纳最大跨度: k * MLKEM_K_MAX
-    let total_ptrs = eval_int {{ `k * `MLKEM_K_MAX }};
-    ptr_arr <- llvm_alloc (llvm_array total_ptrs llvm_ptr);
+    // **Revised Logic**:
+    // Since I can't easily change the helper above without rewriting it, 
+    // I will inline the logic of asserting post-condition using a trick:
+    // We assume the C code does not change the *pointers* in `polyVecOut`, only the data.
+    // So we assert: `polyVecOut[i]` points to `expected[i]`.
     
-    // 生成 k x k 的数据，但放在 stride 位置上
-    rows <- for [0 .. k-1] (\i -> do {
-        cols <- for [0 .. k-1] (\j -> do {
-            // 计算扁平化索引: i * 4 + j
-            let idx = eval_int {{ `i * `MLKEM_K_MAX + `j }};
-            
-            data_ptr <- llvm_alloc (llvm_array MLKEM_N llvm_int16);
-            let var_name = str_concat name (str_concat "_" (str_concat (show i) (str_concat "_" (show j))));
-            var <- llvm_fresh_var var_name (llvm_array MLKEM_N llvm_int16);
-            
-            // === 关键：添加范围约束 ===
-            llvm_precond {{ all safe_bound var }};
-            
-            llvm_points_to data_ptr (llvm_term var);
-            llvm_points_to (llvm_elem ptr_arr idx) data_ptr;
-            
-            return var;
-        });
-        return cols;
+    // To do this clean, I'll inline the "setup_poly_vec" logic for the output vector here to keep handles on pointers.
+    // (Replaces step 3 above)
+    out_ptr_arr <- llvm_alloc (llvm_array k (llvm_pointer llvm_int16_array_n));
+    out_ptrs_and_terms <- for (map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }})) (\i -> do {
+        p <- llvm_alloc llvm_int16_array_n;
+        v <- llvm_fresh_var (str_concat "out_" (show i)) llvm_int16_array_n;
+        llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) v }};
+        llvm_points_to p (llvm_term v);
+        llvm_points_to (llvm_elem out_ptr_arr i) p;
+        return (p, v);
     });
+    let out_terms_list = map snd out_ptrs_and_terms;
+    let out_ptrs_list = map fst out_ptrs_and_terms;
+    let out_term_val = list_term_seq out_terms_list;
     
-    return (ptr_arr, rows);
+    llvm_execute_func [
+        llvm_term {{ `k : [8] }}, matrix_ptr, vec_ptr, out_ptr_arr, factor_ptr
+    ];
+    
+    // Check Output
+    let expected_val = {{ m::matrixMulAdd matrix_term vec_term out_term_val factor_val }};
+    
+    // Assert each pointer points to the corresponding row of expected result
+    // for [0 .. (eval_int {{ `k:[32] }} - 1)] (\i -> do {
+    for (map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }})) (\i -> do {
+        let p = nth out_ptrs_list i; // Getting i-th pointer
+        let e = {{ expected_val @ `i }}; // Getting i-th expected polynomial
+        llvm_points_to p (llvm_term e);
+    });
 };
 
-// 辅助：设置 Factor 表
-// 长度通常是 128 (MLKEM_N / 2)
-let setup_factor = do {
-    let len = 128; 
-    ptr <- llvm_alloc (llvm_array len llvm_int16);
-    val <- llvm_fresh_var "factor" (llvm_array len llvm_int16);
-    // Factor 也必须在安全范围内
-    llvm_precond {{ all safe_bound val }};
-    llvm_points_to ptr (llvm_term val);
-    return (ptr, val);
-};
+// 针对 k=2,3,4 分别验证 (Kyber-512, 768, 1024)
+// 需要 CircMulAdd 和 PolyReduce 作为 overrides
+let overrides = [circMulAdd_thm, polyReduce_thm];
 
-// ==========================================
-// 1. MLKEM_MatrixMulAdd 验证生成器
-// ==========================================
-let mk_matrixMulAdd_spec k = do {
-    (matrix_ptr, matrix_val) <- setup_matrix "matrix" k;
-    (vec_ptr, vec_val) <- setup_polyvec "vec" k;
-    (out_ptr, out_init_val) <- setup_polyvec "out" k;
-    (factor_ptr, factor_val) <- setup_factor;
+// K=2
+llvm_verify m "MLKEM_MatrixMulAdd" overrides false (matrixMulAdd_spec 2) abc;
+// K=3
+llvm_verify m "MLKEM_MatrixMulAdd" overrides false (matrixMulAdd_spec 3) abc;
+// K=4
+llvm_verify m "MLKEM_MatrixMulAdd" overrides false (matrixMulAdd_spec 4) abc;
 
-    // 指针偏移: factor + 64
-    let factor_offset_ptr = llvm_ptr_add factor_ptr 64;
+print "MLKEM_MatrixMulAdd 验证完成 (k=2,3,4)！";
+
+
+// 8. 验证 MLKEM_TransposeMatrixMulAdd
+
+let transposeMatrixMulAdd_spec k = do {
+    (matrix_ptr, matrix_term) <- setup_matrix k;
+    (vec_ptr, vec_terms) <- setup_poly_vec k "vec_";
+    let vec_term = list_term_seq vec_terms;
+
+    // Manual setup for output to keep pointer handles
+    out_ptr_arr <- llvm_alloc (llvm_array k (llvm_pointer llvm_int16_array_n));
+    out_ptrs_and_terms <- for (map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }})) (\i -> do {
+        p <- llvm_alloc llvm_int16_array_n;
+        v <- llvm_fresh_var (str_concat "out_" (show i)) llvm_int16_array_n;
+        llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) v }};
+        llvm_points_to p (llvm_term v);
+        llvm_points_to (llvm_elem out_ptr_arr i) p;
+        return (p, v);
+    });
+    let out_term_val = list_term_seq (map snd out_ptrs_and_terms);
+    let out_ptrs_list = map fst out_ptrs_and_terms;
+
+    factor_ptr <- llvm_alloc (llvm_array 128 llvm_int16);
+    factor_val <- llvm_fresh_var "factor" (llvm_array 128 llvm_int16);
+    llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) factor_val }};
+    llvm_points_to factor_ptr (llvm_term factor_val);
 
     llvm_execute_func [
-        llvm_term {{ `k : [8] }},
-        matrix_ptr,
-        vec_ptr,
-        out_ptr,
-        factor_offset_ptr
+        llvm_term {{ `k : [8] }}, matrix_ptr, vec_ptr, out_ptr_arr, factor_ptr
     ];
 
-    // Cryptol 期望 matrix 是 [k][k][N][16]
-    // 我们的 setup_matrix 返回的 matrix_val 正是这个结构
-    let expected = {{ m::matrixMulAdd matrix_val vec_val out_init_val factor_val }};
+    let expected_val = {{ m::matrixTransposeMulAdd matrix_term vec_term out_term_val factor_val }};
 
-    // 验证输出
-    for [0 .. k-1] (\i -> do {
-        // 读取 out_ptr[i] 指向的地址
-        elem_ptr <- llvm_load_elem out_ptr i; 
-        llvm_points_to elem_ptr (llvm_term {{ expected @ i }});
+    for (map eval_int (eval_list {{ [0 .. `k - 1] : [`k][32] }})) (\i -> do {
+        let p = nth out_ptrs_list i;
+        let e = {{ expected_val @ `i }};
+        llvm_points_to p (llvm_term e);
     });
 };
 
-// ==========================================
-// 2. MLKEM_TransposeMatrixMulAdd 验证生成器
-// ==========================================
-let mk_transposeMatrixMulAdd_spec k = do {
-    (matrix_ptr, matrix_val) <- setup_matrix "matrix" k;
-    (vec_ptr, vec_val) <- setup_polyvec "vec" k;
-    (out_ptr, out_init_val) <- setup_polyvec "out" k;
-    (factor_ptr, factor_val) <- setup_factor;
+llvm_verify m "MLKEM_TransposeMatrixMulAdd" overrides false (transposeMatrixMulAdd_spec 2) abc;
+llvm_verify m "MLKEM_TransposeMatrixMulAdd" overrides false (transposeMatrixMulAdd_spec 3) abc;
+llvm_verify m "MLKEM_TransposeMatrixMulAdd" overrides false (transposeMatrixMulAdd_spec 4) abc;
 
-    let factor_offset_ptr = llvm_ptr_add factor_ptr 64;
+print "MLKEM_TransposeMatrixMulAdd 验证完成 (k=2,3,4)！";
 
-    llvm_execute_func [
-        llvm_term {{ `k : [8] }},
-        matrix_ptr,
-        vec_ptr,
-        out_ptr,
-        factor_offset_ptr
-    ];
 
-    let expected = {{ m::matrixTransposeMulAdd matrix_val vec_val out_init_val factor_val }};
+// 9. 验证 MLKEM_VectorInnerProductAdd
 
-    for [0 .. k-1] (\i -> do {
-        elem_ptr <- llvm_load_elem out_ptr i;
-        llvm_points_to elem_ptr (llvm_term {{ expected @ i }});
-    });
-};
+let vectorInnerProductAdd_spec k = do {
+    // polyVec1
+    (vec1_ptr, vec1_terms) <- setup_poly_vec k "vec1_";
+    let vec1_term = list_term_seq vec1_terms;
 
-// ==========================================
-// 3. MLKEM_VectorInnerProductAdd 验证生成器
-// ==========================================
-let mk_vectorInnerProductAdd_spec k = do {
-    (vec1_ptr, vec1_val) <- setup_polyvec "vec1" k;
-    (vec2_ptr, vec2_val) <- setup_polyvec "vec2" k;
-    
-    // PolyOut 这里是单指针，不是指针数组
-    out_ptr <- llvm_alloc (llvm_array MLKEM_N llvm_int16);
-    out_init <- llvm_fresh_var "out_init" (llvm_array MLKEM_N llvm_int16);
-    llvm_precond {{ all safe_bound out_init }};
+    // polyVec2
+    (vec2_ptr, vec2_terms) <- setup_poly_vec k "vec2_";
+    let vec2_term = list_term_seq vec2_terms;
+
+    // polyOut (单个多项式，不是向量)
+    out_ptr <- llvm_alloc llvm_int16_array_n;
+    out_init <- llvm_fresh_var "out_init" llvm_int16_array_n;
+    llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) out_init }};
     llvm_points_to out_ptr (llvm_term out_init);
 
-    (factor_ptr, factor_val) <- setup_factor;
-    let factor_offset_ptr = llvm_ptr_add factor_ptr 64;
+    // Factor
+    factor_ptr <- llvm_alloc (llvm_array 128 llvm_int16);
+    factor_val <- llvm_fresh_var "factor" (llvm_array 128 llvm_int16);
+    llvm_precond {{ all (\x -> (x >$ -4096) /\ (x <$ 4096)) factor_val }};
+    llvm_points_to factor_ptr (llvm_term factor_val);
 
     llvm_execute_func [
-        llvm_term {{ `k : [8] }},
-        vec1_ptr,
-        vec2_ptr,
-        out_ptr,
-        factor_offset_ptr
+        llvm_term {{ `k : [8] }}, vec1_ptr, vec2_ptr, out_ptr, factor_ptr
     ];
 
-    let expected = {{ m::vectorInnerProductAdd vec1_val vec2_val out_init factor_val }};
+    let expected = {{ m::vectorInnerProductAdd vec1_term vec2_term out_init factor_val }};
     llvm_points_to out_ptr (llvm_term expected);
 };
 
-// ==========================================
-// 4. 执行验证循环 (k = 2, 3, 4)
-// ==========================================
+// 只需要 circMulAdd 即可，不需要 PolyReduce，因为 InnerProductAdd 内部不调用 PolyReduce
+let inner_overrides = [circMulAdd_thm];
 
-// 定义依赖定理列表 (确保这里包含了你的 circMulAdd 和 polyReduce 定理)
-let method_overrides = [circMulAdd_thm, polyReduce_thm];
+llvm_verify m "MLKEM_VectorInnerProductAdd" inner_overrides false (vectorInnerProductAdd_spec 2) abc;
+llvm_verify m "MLKEM_VectorInnerProductAdd" inner_overrides false (vectorInnerProductAdd_spec 3) abc;
+llvm_verify m "MLKEM_VectorInnerProductAdd" inner_overrides false (vectorInnerProductAdd_spec 4) abc;
 
-// 循环验证三个函数
-for [2, 3, 4] (\k -> do {
-    print (str_concat "Verifying Matrix functions for k=" (show k));
-    
-    // 验证 MatrixMulAdd
-    llvm_verify m "MLKEM_MatrixMulAdd" method_overrides false (mk_matrixMulAdd_spec k) abc;
-    
-    // 验证 TransposeMatrixMulAdd
-    llvm_verify m "MLKEM_TransposeMatrixMulAdd" method_overrides false (mk_transposeMatrixMulAdd_spec k) abc;
-    
-    // 验证 VectorInnerProductAdd
-    llvm_verify m "MLKEM_VectorInnerProductAdd" method_overrides false (mk_vectorInnerProductAdd_spec k) abc;
-    
-    print (str_concat "Done k=" (show k));
-});
+print "MLKEM_VectorInnerProductAdd 验证完成 (k=2,3,4)！";
 
-// ==========================================
-// 5. MLKEM_SamplePolyCBD 验证
-// ==========================================
-// 这个函数不依赖 k，而是依赖 eta (2 或 3)
-// 我们可以分别验证两种情况
-
-print "Verifying SamplePolyCBD...";
-
-// Case Eta = 2
-let cbd_eta2_spec = do {
-    poly_ptr <- llvm_alloc (llvm_array MLKEM_N llvm_int16);
+// 10. 验证 MLKEM_SamplePolyCBD
+// CBD 需要根据 eta (2 或 3) 调整 buffer 的输入大小
+// eta=2: buf len 128; eta=3: buf len 192.
+let samplePolyCBD_spec eta_val = do {
+    poly_ptr <- llvm_alloc llvm_int16_array_n;
     
-    // Eta=2, buf size = 2 * (N/4) = 128
-    let len = 128;
-    buf_ptr <- llvm_alloc (llvm_array len llvm_int8);
-    buf_val <- llvm_fresh_var "buf_eta2" (llvm_array len llvm_int8);
+    // 计算 buf 长度: eta * 64
+    let buf_len = eval_int {{ `eta_val * 64 : [32] }};
+    buf_ptr <- llvm_alloc (llvm_array buf_len (llvm_int 8));
+    buf_val <- llvm_fresh_var "buf" (llvm_array buf_len (llvm_int 8));
     llvm_points_to buf_ptr (llvm_term buf_val);
 
     llvm_execute_func [
-        poly_ptr,
-        buf_ptr,
-        llvm_term {{ 2 : [8] }}
+        poly_ptr, 
+        buf_ptr, 
+        llvm_term {{ `eta_val : [8] }} 
     ];
 
-    // 这里的 buf_val 长度是 128，Cryptol 那边 polyCBD_eta2 刚好接受 128
-    let expected = {{ m::polyCBD_eta2 buf_val }};
-    llvm_points_to poly_ptr (llvm_term expected);
-};
-
-llvm_verify m "MLKEM_SamplePolyCBD" [] false cbd_eta2_spec abc;
-
-// Case Eta = 3
-let cbd_eta3_spec = do {
-    poly_ptr <- llvm_alloc (llvm_array MLKEM_N llvm_int16);
+    // 构造 Cryptol 期望的输入
+    // Cryptol spec `samplePolyCBD` 总是接受 [192][8] (3*64)
+    // 如果 eta=2，我们需要填充 buf 到 192 字节，或者如果 Cryptol 内部有处理
+    // 观察 Cryptol 代码: `samplePolyCBD buf eta` 
+    // 如果 eta=2，它调用 `polyCBD_eta2 (take buf)`。
+    // 但是 `samplePolyCBD` 的类型签名是 `[3*QuarterN][8] -> ...`
+    // 所以在 SAW 中，我们需要把长度为 128 的 buf_val 填充到 192 传给 Cryptol 模型
     
-    // Eta=3, buf size = 3 * (N/4) = 192
-    let len = 192;
-    buf_ptr <- llvm_alloc (llvm_array len llvm_int8);
-    buf_val <- llvm_fresh_var "buf_eta3" (llvm_array len llvm_int8);
-    llvm_points_to buf_ptr (llvm_term buf_val);
+    let input_to_cryptol = 
+        if eval_bool {{ `eta_val == 2 }} 
+        then {{ buf_val # (zero : [64][8]) }} 
+        else {{ buf_val }};
 
-    llvm_execute_func [
-        poly_ptr,
-        buf_ptr,
-        llvm_term {{ 3 : [8] }}
-    ];
-
-    let expected = {{ m::polyCBD_eta3 buf_val }};
+    let expected = {{ m::samplePolyCBD input_to_cryptol `eta_val }};
     llvm_points_to poly_ptr (llvm_term expected);
 };
 
-llvm_verify m "MLKEM_SamplePolyCBD" [] false cbd_eta3_spec abc;
+// 验证 eta=2
+llvm_verify m "MLKEM_SamplePolyCBD" [] false (samplePolyCBD_spec 2) abc;
+// 验证 eta=3
+llvm_verify m "MLKEM_SamplePolyCBD" [] false (samplePolyCBD_spec 3) abc;
 
-print "所有验证完成！";
+print "MLKEM_SamplePolyCBD 验证完成 (eta=2,3)！";
+print "所有 ML-KEM Poly 模块验证结束。";

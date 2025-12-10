@@ -1,0 +1,65 @@
+enable_experimental;
+
+// 1. 加载 Cryptol 规范
+import "ml_compress.cry";
+
+// 2. 加载 LLVM 字节码
+m <- llvm_load_module "mlkem_compress.bc";
+
+// -----------------------------------------------------------------------------
+// 辅助配置
+// -----------------------------------------------------------------------------
+
+// 设置整数位宽
+let i8  = llvm_int 8;
+let i16 = llvm_int 16;
+let i64 = llvm_int 64;
+
+// -----------------------------------------------------------------------------
+// Compress 验证
+// -----------------------------------------------------------------------------
+
+let compress_spec = do {
+    // 声明输入变量
+    x <- llvm_fresh_var "x" i16;
+    d <- llvm_fresh_var "d" i8;
+
+    // 执行 C 函数
+    llvm_execute_func [llvm_term x, llvm_term d];
+
+    // 断言返回值等于 Cryptol 模型计算的结果
+    llvm_return (llvm_term {{ compress x d }});
+};
+
+// 执行验证
+// 使用 Z3 求解器。对于包含位移和乘法的压缩逻辑，ABC 有时也很快，但 Z3 处理算术更通用。
+print "Verifying Compress...";
+compress_ov <- llvm_verify m "Compress" [] false compress_spec z3;
+print "Done.";
+
+// -----------------------------------------------------------------------------
+// DeCompress 验证
+// -----------------------------------------------------------------------------
+
+let decompress_spec = do {
+    // 声明输入变量
+    x <- llvm_fresh_var "x" i16;
+    bits <- llvm_fresh_var "bits" i8;
+
+    // 添加 precondition：bits 的范围
+    // 在实际 Kyber 场景中，bits 通常是 {1, 4, 5, 10, 11} 等。
+    // 如果不加约束，shift overflow 可能会导致 SAW 报错 (Undefined Behavior)。
+    // 这里我们限制 bits < 16 (因为返回值是 int16，移位太大无意义且可能导致 C undefined behavior)
+    llvm_precond {{ bits > 0 /\ bits < 12 }};
+
+    // 执行 C 函数
+    llvm_execute_func [llvm_term x, llvm_term bits];
+
+    // 断言返回值等于 Cryptol 模型计算的结果
+    llvm_return (llvm_term {{ decompress x bits }});
+};
+
+// 执行验证
+print "Verifying DeCompress...";
+decompress_ov <- llvm_verify m "DeCompress" [] false decompress_spec z3;
+print "Done.";

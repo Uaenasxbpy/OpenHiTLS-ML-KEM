@@ -1,0 +1,631 @@
+enable_experimental;
+
+// ------------------------------------------------------------
+// 导入 Cryptol 规范模块
+// ------------------------------------------------------------
+import "BarrettReduction.cry";
+import "ml_kem_poly.cry" as ML;
+
+// ------------------------------------------------------------
+// 加载 LLVM bitcode 模块（由你的 C 文件生成）
+// ------------------------------------------------------------
+m <- llvm_load_module "ml_kem_poly.bc";
+
+// ------------------------------------------------------------
+// 常量与类型别名
+// ------------------------------------------------------------
+let MLKEM_N         = 256;
+let MLKEM_QUARTER_N = 64;
+let MLKEM_K_MAX     = 4;
+
+let llvm_int8  = llvm_int 8;
+let llvm_int16 = llvm_int 16;
+
+let llvm_int16_array_n   = llvm_array MLKEM_N llvm_int16;
+let llvm_int16_array_qn  = llvm_array MLKEM_QUARTER_N llvm_int16;
+let llvm_int16_array_128 = llvm_array 128 llvm_int16;
+
+let llvm_i16_ptr          = llvm_pointer llvm_int16;
+let llvm_i16_ptr_array_k  = llvm_array MLKEM_K_MAX llvm_i16_ptr;
+// 注意这里直接写 16，避免使用 `*`
+let llvm_i16_ptr_array_mat = llvm_array 16 llvm_i16_ptr;
+
+// ------------------------------------------------------------
+// PolyReduce 规范
+// C: static void PolyReduce(int16_t *poly)
+// ------------------------------------------------------------
+let polyReduce_spec = do {
+  poly_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  poly_init    <- llvm_fresh_var "poly" llvm_int16_array_n;
+  llvm_points_to poly_arr_ptr (llvm_term poly_init);
+
+  // int16_t *poly = &poly[0]
+  let poly_ptr = llvm_elem poly_arr_ptr 0;
+
+  llvm_execute_func [poly_ptr];
+
+  let expected = {{ ML::polyReduce poly_init }};
+  llvm_points_to poly_arr_ptr (llvm_term expected);
+};
+
+polyReduce_thm <- llvm_verify m "PolyReduce" [] false polyReduce_spec abc;
+print "PolyReduce 验证完成！";
+
+// ------------------------------------------------------------
+// BaseMulAdd 规范
+// C: static void BaseMulAdd(int16_t polyH[2], const int16_t f0,...)
+// ------------------------------------------------------------
+let baseMulAdd_spec = do {
+  polyH_arr_ptr <- llvm_alloc (llvm_array 2 llvm_int16);
+  polyH_init    <- llvm_fresh_var "polyH_init" (llvm_array 2 llvm_int16);
+  llvm_points_to polyH_arr_ptr (llvm_term polyH_init);
+
+  // int16_t *polyH = &polyH[0]
+  let polyH_ptr = llvm_elem polyH_arr_ptr 0;
+
+  f0     <- llvm_fresh_var "f0" llvm_int16;
+  f1     <- llvm_fresh_var "f1" llvm_int16;
+  g0     <- llvm_fresh_var "g0" llvm_int16;
+  g1     <- llvm_fresh_var "g1" llvm_int16;
+  factor <- llvm_fresh_var "factor" llvm_int16;
+
+  // 约束到合理范围，缓解状态爆炸
+  llvm_precond {{ (f0 >$ (-4096 : [16])) /\ (f0 <$ (4096 : [16])) }};
+  llvm_precond {{ (f1 >$ (-4096 : [16])) /\ (f1 <$ (4096 : [16])) }};
+  llvm_precond {{ (g0 >$ (-4096 : [16])) /\ (g0 <$ (4096 : [16])) }};
+  llvm_precond {{ (g1 >$ (-4096 : [16])) /\ (g1 <$ (4096 : [16])) }};
+
+  llvm_execute_func
+    [ polyH_ptr
+    , llvm_term f0
+    , llvm_term f1
+    , llvm_term g0
+    , llvm_term g1
+    , llvm_term factor
+    ];
+
+  let expected = {{ ML::baseMulAdd polyH_init f0 f1 g0 g1 factor }};
+  llvm_points_to polyH_arr_ptr (llvm_term expected);
+};
+
+baseMulAdd_thm <- llvm_verify m "BaseMulAdd" [] false baseMulAdd_spec abc;
+print "BaseMulAdd 验证完成！";
+
+// ------------------------------------------------------------
+// CircMulAdd 规范
+// C: static void CircMulAdd(int16_t dest[256],
+//                           const int16_t src1[256],
+//                           const int16_t src2[256],
+//                           const int16_t *factor)
+// ------------------------------------------------------------
+let circMulAdd_spec = do {
+  dest_arr_ptr   <- llvm_alloc llvm_int16_array_n;
+  src1_arr_ptr   <- llvm_alloc llvm_int16_array_n;
+  src2_arr_ptr   <- llvm_alloc llvm_int16_array_n;
+  factor_arr_ptr <- llvm_alloc llvm_int16_array_qn;  // 64
+
+  dest_init <- llvm_fresh_var "dest_init" llvm_int16_array_n;
+  src1      <- llvm_fresh_var "src1"      llvm_int16_array_n;
+  src2      <- llvm_fresh_var "src2"      llvm_int16_array_n;
+  factor    <- llvm_fresh_var "factor"    llvm_int16_array_qn;
+
+  llvm_points_to dest_arr_ptr   (llvm_term dest_init);
+  llvm_points_to src1_arr_ptr   (llvm_term src1);
+  llvm_points_to src2_arr_ptr   (llvm_term src2);
+  llvm_points_to factor_arr_ptr (llvm_term factor);
+
+  let dest_ptr   = llvm_elem dest_arr_ptr   0;
+  let src1_ptr   = llvm_elem src1_arr_ptr   0;
+  let src2_ptr   = llvm_elem src2_arr_ptr   0;
+  let factor_ptr = llvm_elem factor_arr_ptr 0;
+
+  llvm_precond {{ all (\x -> (x >$ (-4096 : [16])) /\ (x <$ (4096 : [16]))) src1 }};
+  llvm_precond {{ all (\x -> (x >$ (-4096 : [16])) /\ (x <$ (4096 : [16]))) src2 }};
+  llvm_precond {{ all (\x -> (x >$ (-4096 : [16])) /\ (x <$ (4096 : [16]))) factor }};
+
+  llvm_execute_func [dest_ptr, src1_ptr, src2_ptr, factor_ptr];
+
+  let expected = {{ ML::circMulAdd dest_init src1 src2 factor }};
+  llvm_points_to dest_arr_ptr (llvm_term expected);
+};
+
+circMulAdd_thm <- llvm_verify m "CircMulAdd" [baseMulAdd_thm] false circMulAdd_spec abc;
+print "CircMulAdd 验证完成！";
+
+// ------------------------------------------------------------
+// MLKEM_MatrixMulAdd 规范
+// C: void MLKEM_MatrixMulAdd(uint8_t k,
+//                            int16_t **matrix,
+//                            int16_t **polyVec,
+//                            int16_t **polyVecOut,
+//                            const int16_t *factor)
+// 固定 k = 4
+// ------------------------------------------------------------
+let matrixMulAdd_spec = do {
+  // factor[128]
+  factor_arr_ptr <- llvm_alloc llvm_int16_array_128;
+  factor_val     <- llvm_fresh_var "factor" llvm_int16_array_128;
+  llvm_points_to factor_arr_ptr (llvm_term factor_val);
+  let factor_ptr = llvm_elem factor_arr_ptr 0;
+
+  // matrix 4x4
+  m00_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m00         <- llvm_fresh_var "m00" llvm_int16_array_n;
+  llvm_points_to m00_arr_ptr (llvm_term m00);
+  let m00_base = llvm_elem m00_arr_ptr 0;
+
+  m01_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m01         <- llvm_fresh_var "m01" llvm_int16_array_n;
+  llvm_points_to m01_arr_ptr (llvm_term m01);
+  let m01_base = llvm_elem m01_arr_ptr 0;
+
+  m02_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m02         <- llvm_fresh_var "m02" llvm_int16_array_n;
+  llvm_points_to m02_arr_ptr (llvm_term m02);
+  let m02_base = llvm_elem m02_arr_ptr 0;
+
+  m03_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m03         <- llvm_fresh_var "m03" llvm_int16_array_n;
+  llvm_points_to m03_arr_ptr (llvm_term m03);
+  let m03_base = llvm_elem m03_arr_ptr 0;
+
+  m10_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m10         <- llvm_fresh_var "m10" llvm_int16_array_n;
+  llvm_points_to m10_arr_ptr (llvm_term m10);
+  let m10_base = llvm_elem m10_arr_ptr 0;
+
+  m11_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m11         <- llvm_fresh_var "m11" llvm_int16_array_n;
+  llvm_points_to m11_arr_ptr (llvm_term m11);
+  let m11_base = llvm_elem m11_arr_ptr 0;
+
+  m12_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m12         <- llvm_fresh_var "m12" llvm_int16_array_n;
+  llvm_points_to m12_arr_ptr (llvm_term m12);
+  let m12_base = llvm_elem m12_arr_ptr 0;
+
+  m13_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m13         <- llvm_fresh_var "m13" llvm_int16_array_n;
+  llvm_points_to m13_arr_ptr (llvm_term m13);
+  let m13_base = llvm_elem m13_arr_ptr 0;
+
+  m20_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m20         <- llvm_fresh_var "m20" llvm_int16_array_n;
+  llvm_points_to m20_arr_ptr (llvm_term m20);
+  let m20_base = llvm_elem m20_arr_ptr 0;
+
+  m21_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m21         <- llvm_fresh_var "m21" llvm_int16_array_n;
+  llvm_points_to m21_arr_ptr (llvm_term m21);
+  let m21_base = llvm_elem m21_arr_ptr 0;
+
+  m22_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m22         <- llvm_fresh_var "m22" llvm_int16_array_n;
+  llvm_points_to m22_arr_ptr (llvm_term m22);
+  let m22_base = llvm_elem m22_arr_ptr 0;
+
+  m23_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m23         <- llvm_fresh_var "m23" llvm_int16_array_n;
+  llvm_points_to m23_arr_ptr (llvm_term m23);
+  let m23_base = llvm_elem m23_arr_ptr 0;
+
+  m30_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m30         <- llvm_fresh_var "m30" llvm_int16_array_n;
+  llvm_points_to m30_arr_ptr (llvm_term m30);
+  let m30_base = llvm_elem m30_arr_ptr 0;
+
+  m31_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m31         <- llvm_fresh_var "m31" llvm_int16_array_n;
+  llvm_points_to m31_arr_ptr (llvm_term m31);
+  let m31_base = llvm_elem m31_arr_ptr 0;
+
+  m32_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m32         <- llvm_fresh_var "m32" llvm_int16_array_n;
+  llvm_points_to m32_arr_ptr (llvm_term m32);
+  let m32_base = llvm_elem m32_arr_ptr 0;
+
+  m33_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  m33         <- llvm_fresh_var "m33" llvm_int16_array_n;
+  llvm_points_to m33_arr_ptr (llvm_term m33);
+  let m33_base = llvm_elem m33_arr_ptr 0;
+
+  matrix_arr_ptr <- llvm_alloc llvm_i16_ptr_array_mat;
+  llvm_points_to matrix_arr_ptr
+    (llvm_array_value
+      [ m00_base, m01_base, m02_base, m03_base
+      , m10_base, m11_base, m12_base, m13_base
+      , m20_base, m21_base, m22_base, m23_base
+      , m30_base, m31_base, m32_base, m33_base
+      ]);
+  let matrix_ptr = llvm_elem matrix_arr_ptr 0;
+
+  // polyVec[4]
+  v0_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v0         <- llvm_fresh_var "v0" llvm_int16_array_n;
+  llvm_points_to v0_arr_ptr (llvm_term v0);
+  let v0_base = llvm_elem v0_arr_ptr 0;
+
+  v1_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v1         <- llvm_fresh_var "v1" llvm_int16_array_n;
+  llvm_points_to v1_arr_ptr (llvm_term v1);
+  let v1_base = llvm_elem v1_arr_ptr 0;
+
+  v2_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v2         <- llvm_fresh_var "v2" llvm_int16_array_n;
+  llvm_points_to v2_arr_ptr (llvm_term v2);
+  let v2_base = llvm_elem v2_arr_ptr 0;
+
+  v3_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v3         <- llvm_fresh_var "v3" llvm_int16_array_n;
+  llvm_points_to v3_arr_ptr (llvm_term v3);
+  let v3_base = llvm_elem v3_arr_ptr 0;
+
+  polyVec_arr_ptr <- llvm_alloc llvm_i16_ptr_array_k;
+  llvm_points_to polyVec_arr_ptr
+    (llvm_array_value [v0_base, v1_base, v2_base, v3_base]);
+  let polyVec_ptr = llvm_elem polyVec_arr_ptr 0;
+
+  // polyVecOut[4]
+  out0_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  out0_init    <- llvm_fresh_var "out0_init" llvm_int16_array_n;
+  llvm_points_to out0_arr_ptr (llvm_term out0_init);
+  let out0_base = llvm_elem out0_arr_ptr 0;
+
+  out1_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  out1_init    <- llvm_fresh_var "out1_init" llvm_int16_array_n;
+  llvm_points_to out1_arr_ptr (llvm_term out1_init);
+  let out1_base = llvm_elem out1_arr_ptr 0;
+
+  out2_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  out2_init    <- llvm_fresh_var "out2_init" llvm_int16_array_n;
+  llvm_points_to out2_arr_ptr (llvm_term out2_init);
+  let out2_base = llvm_elem out2_arr_ptr 0;
+
+  out3_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  out3_init    <- llvm_fresh_var "out3_init" llvm_int16_array_n;
+  llvm_points_to out3_arr_ptr (llvm_term out3_init);
+  let out3_base = llvm_elem out3_arr_ptr 0;
+
+  polyVecOut_arr_ptr <- llvm_alloc llvm_i16_ptr_array_k;
+  llvm_points_to polyVecOut_arr_ptr
+    (llvm_array_value [out0_base, out1_base, out2_base, out3_base]);
+  let polyVecOut_ptr = llvm_elem polyVecOut_arr_ptr 0;
+
+  // 调用 C 函数：k = 4
+  llvm_execute_func
+    [ llvm_term {{ 4 : [8] }}
+    , matrix_ptr
+    , polyVec_ptr
+    , polyVecOut_ptr
+    , factor_ptr
+    ];
+
+  // Cryptol 规范
+  let mat_val = {{
+        ML::matrixMulAdd
+          [ [ m00, m01, m02, m03 ]
+          , [ m10, m11, m12, m13 ]
+          , [ m20, m21, m22, m23 ]
+          , [ m30, m31, m32, m33 ] ]
+          [ v0, v1, v2, v3 ]
+          [ out0_init, out1_init, out2_init, out3_init ]
+          factor_val
+      }};
+
+  let expected0 = {{ mat_val @ 0 }};
+  let expected1 = {{ mat_val @ 1 }};
+  let expected2 = {{ mat_val @ 2 }};
+  let expected3 = {{ mat_val @ 3 }};
+
+  llvm_points_to out0_arr_ptr (llvm_term expected0);
+  llvm_points_to out1_arr_ptr (llvm_term expected1);
+  llvm_points_to out2_arr_ptr (llvm_term expected2);
+  llvm_points_to out3_arr_ptr (llvm_term expected3);
+};
+
+matrixMulAdd_thm <-
+  llvm_verify m "MLKEM_MatrixMulAdd"
+    [circMulAdd_thm, polyReduce_thm]
+    false
+    matrixMulAdd_spec
+    abc;
+
+print "MLKEM_MatrixMulAdd 验证完成！";
+
+// ------------------------------------------------------------
+// MLKEM_TransposeMatrixMulAdd 规范
+// C: void MLKEM_TransposeMatrixMulAdd(uint8_t k,
+//                                     int16_t **matrix,
+//                                     int16_t **polyVec,
+//                                     int16_t **polyVecOut,
+//                                     const int16_t *factor)
+// ------------------------------------------------------------
+let transposeMatrixMulAdd_spec = do {
+  factor_arr_ptr <- llvm_alloc llvm_int16_array_128;
+  factor_val     <- llvm_fresh_var "factorT" llvm_int16_array_128;
+  llvm_points_to factor_arr_ptr (llvm_term factor_val);
+  let factor_ptr = llvm_elem factor_arr_ptr 0;
+
+  // matrix 4x4（t 前缀）
+  t00_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t00         <- llvm_fresh_var "t00" llvm_int16_array_n;
+  llvm_points_to t00_arr_ptr (llvm_term t00);
+  let t00_base = llvm_elem t00_arr_ptr 0;
+
+  t01_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t01         <- llvm_fresh_var "t01" llvm_int16_array_n;
+  llvm_points_to t01_arr_ptr (llvm_term t01);
+  let t01_base = llvm_elem t01_arr_ptr 0;
+
+  t02_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t02         <- llvm_fresh_var "t02" llvm_int16_array_n;
+  llvm_points_to t02_arr_ptr (llvm_term t02);
+  let t02_base = llvm_elem t02_arr_ptr 0;
+
+  t03_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t03         <- llvm_fresh_var "t03" llvm_int16_array_n;
+  llvm_points_to t03_arr_ptr (llvm_term t03);
+  let t03_base = llvm_elem t03_arr_ptr 0;
+
+  t10_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t10         <- llvm_fresh_var "t10" llvm_int16_array_n;
+  llvm_points_to t10_arr_ptr (llvm_term t10);
+  let t10_base = llvm_elem t10_arr_ptr 0;
+
+  t11_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t11         <- llvm_fresh_var "t11" llvm_int16_array_n;
+  llvm_points_to t11_arr_ptr (llvm_term t11);
+  let t11_base = llvm_elem t11_arr_ptr 0;
+
+  t12_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t12         <- llvm_fresh_var "t12" llvm_int16_array_n;
+  llvm_points_to t12_arr_ptr (llvm_term t12);
+  let t12_base = llvm_elem t12_arr_ptr 0;
+
+  t13_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t13         <- llvm_fresh_var "t13" llvm_int16_array_n;
+  llvm_points_to t13_arr_ptr (llvm_term t13);
+  let t13_base = llvm_elem t13_arr_ptr 0;
+
+  t20_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t20         <- llvm_fresh_var "t20" llvm_int16_array_n;
+  llvm_points_to t20_arr_ptr (llvm_term t20);
+  let t20_base = llvm_elem t20_arr_ptr 0;
+
+  t21_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t21         <- llvm_fresh_var "t21" llvm_int16_array_n;
+  llvm_points_to t21_arr_ptr (llvm_term t21);
+  let t21_base = llvm_elem t21_arr_ptr 0;
+
+  t22_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t22         <- llvm_fresh_var "t22" llvm_int16_array_n;
+  llvm_points_to t22_arr_ptr (llvm_term t22);
+  let t22_base = llvm_elem t22_arr_ptr 0;
+
+  t23_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t23         <- llvm_fresh_var "t23" llvm_int16_array_n;
+  llvm_points_to t23_arr_ptr (llvm_term t23);
+  let t23_base = llvm_elem t23_arr_ptr 0;
+
+  t30_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t30         <- llvm_fresh_var "t30" llvm_int16_array_n;
+  llvm_points_to t30_arr_ptr (llvm_term t30);
+  let t30_base = llvm_elem t30_arr_ptr 0;
+
+  t31_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t31         <- llvm_fresh_var "t31" llvm_int16_array_n;
+  llvm_points_to t31_arr_ptr (llvm_term t31);
+  let t31_base = llvm_elem t31_arr_ptr 0;
+
+  t32_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t32         <- llvm_fresh_var "t32" llvm_int16_array_n;
+  llvm_points_to t32_arr_ptr (llvm_term t32);
+  let t32_base = llvm_elem t32_arr_ptr 0;
+
+  t33_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  t33         <- llvm_fresh_var "t33" llvm_int16_array_n;
+  llvm_points_to t33_arr_ptr (llvm_term t33);
+  let t33_base = llvm_elem t33_arr_ptr 0;
+
+  t_matrix_arr_ptr <- llvm_alloc llvm_i16_ptr_array_mat;
+  llvm_points_to t_matrix_arr_ptr
+    (llvm_array_value
+      [ t00_base, t01_base, t02_base, t03_base
+      , t10_base, t11_base, t12_base, t13_base
+      , t20_base, t21_base, t22_base, t23_base
+      , t30_base, t31_base, t32_base, t33_base
+      ]);
+  let t_matrix_ptr = llvm_elem t_matrix_arr_ptr 0;
+
+  // polyVec
+  tv0_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tv0         <- llvm_fresh_var "tv0" llvm_int16_array_n;
+  llvm_points_to tv0_arr_ptr (llvm_term tv0);
+  let tv0_base = llvm_elem tv0_arr_ptr 0;
+
+  tv1_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tv1         <- llvm_fresh_var "tv1" llvm_int16_array_n;
+  llvm_points_to tv1_arr_ptr (llvm_term tv1);
+  let tv1_base = llvm_elem tv1_arr_ptr 0;
+
+  tv2_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tv2         <- llvm_fresh_var "tv2" llvm_int16_array_n;
+  llvm_points_to tv2_arr_ptr (llvm_term tv2);
+  let tv2_base = llvm_elem tv2_arr_ptr 0;
+
+  tv3_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tv3         <- llvm_fresh_var "tv3" llvm_int16_array_n;
+  llvm_points_to tv3_arr_ptr (llvm_term tv3);
+  let tv3_base = llvm_elem tv3_arr_ptr 0;
+
+  t_polyVec_arr_ptr <- llvm_alloc llvm_i16_ptr_array_k;
+  llvm_points_to t_polyVec_arr_ptr
+    (llvm_array_value [tv0_base, tv1_base, tv2_base, tv3_base]);
+  let t_polyVec_ptr = llvm_elem t_polyVec_arr_ptr 0;
+
+  // polyVecOut
+  tout0_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tout0_init    <- llvm_fresh_var "tout0_init" llvm_int16_array_n;
+  llvm_points_to tout0_arr_ptr (llvm_term tout0_init);
+  let tout0_base = llvm_elem tout0_arr_ptr 0;
+
+  tout1_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tout1_init    <- llvm_fresh_var "tout1_init" llvm_int16_array_n;
+  llvm_points_to tout1_arr_ptr (llvm_term tout1_init);
+  let tout1_base = llvm_elem tout1_arr_ptr 0;
+
+  tout2_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tout2_init    <- llvm_fresh_var "tout2_init" llvm_int16_array_n;
+  llvm_points_to tout2_arr_ptr (llvm_term tout2_init);
+  let tout2_base = llvm_elem tout2_arr_ptr 0;
+
+  tout3_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  tout3_init    <- llvm_fresh_var "tout3_init" llvm_int16_array_n;
+  llvm_points_to tout3_arr_ptr (llvm_term tout3_init);
+  let tout3_base = llvm_elem tout3_arr_ptr 0;
+
+  t_polyVecOut_arr_ptr <- llvm_alloc llvm_i16_ptr_array_k;
+  llvm_points_to t_polyVecOut_arr_ptr
+    (llvm_array_value [tout0_base, tout1_base, tout2_base, tout3_base]);
+  let t_polyVecOut_ptr = llvm_elem t_polyVecOut_arr_ptr 0;
+
+  // 调用 C 函数，k = 4
+  llvm_execute_func
+    [ llvm_term {{ 4 : [8] }}
+    , t_matrix_ptr
+    , t_polyVec_ptr
+    , t_polyVecOut_ptr
+    , factor_ptr
+    ];
+
+  let t_mat_val = {{
+        ML::matrixTransposeMulAdd
+          [ [ t00, t01, t02, t03 ]
+          , [ t10, t11, t12, t13 ]
+          , [ t20, t21, t22, t23 ]
+          , [ t30, t31, t32, t33 ] ]
+          [ tv0, tv1, tv2, tv3 ]
+          [ tout0_init, tout1_init, tout2_init, tout3_init ]
+          factor_val
+      }};
+
+  let t_expected0 = {{ t_mat_val @ 0 }};
+  let t_expected1 = {{ t_mat_val @ 1 }};
+  let t_expected2 = {{ t_mat_val @ 2 }};
+  let t_expected3 = {{ t_mat_val @ 3 }};
+
+  llvm_points_to tout0_arr_ptr (llvm_term t_expected0);
+  llvm_points_to tout1_arr_ptr (llvm_term t_expected1);
+  llvm_points_to tout2_arr_ptr (llvm_term t_expected2);
+  llvm_points_to tout3_arr_ptr (llvm_term t_expected3);
+};
+
+transposeMatrixMulAdd_thm <-
+  llvm_verify m "MLKEM_TransposeMatrixMulAdd"
+    [circMulAdd_thm]
+    false
+    transposeMatrixMulAdd_spec
+    abc;
+
+print "MLKEM_TransposeMatrixMulAdd 验证完成！";
+
+// ------------------------------------------------------------
+// MLKEM_VectorInnerProductAdd 规范
+// C: void MLKEM_VectorInnerProductAdd(uint8_t k,
+//                                     int16_t **polyVec1,
+//                                     int16_t **polyVec2,
+//                                     int16_t *polyOut,
+//                                     const int16_t *factor)
+// ------------------------------------------------------------
+let vectorInnerProductAdd_spec = do {
+  factor_arr_ptr <- llvm_alloc llvm_int16_array_128;
+  factor_val     <- llvm_fresh_var "factorV" llvm_int16_array_128;
+  llvm_points_to factor_arr_ptr (llvm_term factor_val);
+  let factor_ptr = llvm_elem factor_arr_ptr 0;
+
+  // polyVec1[4]
+  v10_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v10         <- llvm_fresh_var "v10" llvm_int16_array_n;
+  llvm_points_to v10_arr_ptr (llvm_term v10);
+  let v10_base = llvm_elem v10_arr_ptr 0;
+
+  v11_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v11         <- llvm_fresh_var "v11" llvm_int16_array_n;
+  llvm_points_to v11_arr_ptr (llvm_term v11);
+  let v11_base = llvm_elem v11_arr_ptr 0;
+
+  v12_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v12         <- llvm_fresh_var "v12" llvm_int16_array_n;
+  llvm_points_to v12_arr_ptr (llvm_term v12);
+  let v12_base = llvm_elem v12_arr_ptr 0;
+
+  v13_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  v13         <- llvm_fresh_var "v13" llvm_int16_array_n;
+  llvm_points_to v13_arr_ptr (llvm_term v13);
+  let v13_base = llvm_elem v13_arr_ptr 0;
+
+  vec1_arr_ptr <- llvm_alloc llvm_i16_ptr_array_k;
+  llvm_points_to vec1_arr_ptr
+    (llvm_array_value [v10_base, v11_base, v12_base, v13_base]);
+  let vec1_ptr = llvm_elem vec1_arr_ptr 0;
+
+  // polyVec2[4]
+  u10_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  u10         <- llvm_fresh_var "u10" llvm_int16_array_n;
+  llvm_points_to u10_arr_ptr (llvm_term u10);
+  let u10_base = llvm_elem u10_arr_ptr 0;
+
+  u11_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  u11         <- llvm_fresh_var "u11" llvm_int16_array_n;
+  llvm_points_to u11_arr_ptr (llvm_term u11);
+  let u11_base = llvm_elem u11_arr_ptr 0;
+
+  u12_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  u12         <- llvm_fresh_var "u12" llvm_int16_array_n;
+  llvm_points_to u12_arr_ptr (llvm_term u12);
+  let u12_base = llvm_elem u12_arr_ptr 0;
+
+  u13_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  u13         <- llvm_fresh_var "u13" llvm_int16_array_n;
+  llvm_points_to u13_arr_ptr (llvm_term u13);
+  let u13_base = llvm_elem u13_arr_ptr 0;
+
+  vec2_arr_ptr <- llvm_alloc llvm_i16_ptr_array_k;
+  llvm_points_to vec2_arr_ptr
+    (llvm_array_value [u10_base, u11_base, u12_base, u13_base]);
+  let vec2_ptr = llvm_elem vec2_arr_ptr 0;
+
+  // polyOut
+  out_arr_ptr <- llvm_alloc llvm_int16_array_n;
+  out_init    <- llvm_fresh_var "out_init" llvm_int16_array_n;
+  llvm_points_to out_arr_ptr (llvm_term out_init);
+  let out_base = llvm_elem out_arr_ptr 0;
+
+  // 调用 C 函数（k = 4）
+  llvm_execute_func
+    [ llvm_term {{ 4 : [8] }}
+    , vec1_ptr
+    , vec2_ptr
+    , out_base
+    , factor_ptr
+    ];
+
+  let out_expected = {{
+        ML::vectorInnerProductAdd
+          [ v10, v11, v12, v13 ]
+          [ u10, u11, u12, u13 ]
+          out_init
+          factor_val
+      }};
+
+  llvm_points_to out_arr_ptr (llvm_term out_expected);
+};
+
+vectorInnerProductAdd_thm <-
+  llvm_verify m "MLKEM_VectorInnerProductAdd"
+    [circMulAdd_thm]
+    false
+    vectorInnerProductAdd_spec
+    abc;
+
+print "MLKEM_VectorInnerProductAdd 验证完成！";
