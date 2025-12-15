@@ -1,0 +1,25 @@
+module ml_kem_pke::hash::hash where
+
+
+import Primitive::Keyless::Hash::SHA3::Instantiations::SHA3_256 as SHA3_256
+import Primitive::Keyless::Hash::SHA3::Instantiations::SHA3_512 as SHA3_512
+import Primitive::Keyless::Hash::SHA3::Instantiations::SHAKE128 as SHAKE128
+import Primitive::Keyless::Hash::SHA3::Instantiations::SHAKE256 as SHAKE256
+
+type Byte = [8]
+
+
+HashFuncH : {n} (fin n) => [n]Byte -> [32]Byte
+HashFuncH input = SHA3_256::hashBytes input
+
+HashFuncG : {n} (fin n) => [n]Byte -> [64]Byte
+HashFuncG input = SHA3_512::hashBytes input
+
+HashFuncXOF : {n, outLen} (fin n, fin outLen) => [n]Byte -> [outLen]Byte
+HashFuncXOF input = SHAKE128::xofBytes input
+
+HashFuncJ : {n} (fin n) => [n]Byte -> [32]Byte
+HashFuncJ input = SHAKE256::xofBytes input
+
+PRF : {n, outLen} (fin n, fin outLen) => [n]Byte -> [outLen]Byte
+PRF extSeed = SHAKE256::xofBytes extSeed

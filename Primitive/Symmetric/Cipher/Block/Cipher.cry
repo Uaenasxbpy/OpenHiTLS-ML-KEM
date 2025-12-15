@@ -1,0 +1,11 @@
+/*
+ * @copyright Galois, Inc. 2013-2018
+ * @author Nichole Schimanski <nls@galois.com>
+ */
+
+module Primitive::Symmetric::Cipher::Block::Cipher where
+
+type Cipher KeySize BlockSize =
+  { encrypt : [KeySize] -> [BlockSize] -> [BlockSize]
+  , decrypt : [KeySize] -> [BlockSize] -> [BlockSize]
+  }

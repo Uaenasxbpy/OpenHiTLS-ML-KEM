@@ -14,7 +14,7 @@
  */
 
 #include "hitls_build.h"
-#ifdef HITLS_CRYPTO_MLKEM
+// #ifdef HITLS_CRYPTO_MLKEM
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

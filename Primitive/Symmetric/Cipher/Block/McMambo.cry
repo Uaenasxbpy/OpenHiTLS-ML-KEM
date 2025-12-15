@@ -1,0 +1,228 @@
+/*
+ * @copyright Galois, Inc
+ * @editor Nichole Schimanski <nls@galois.com>
+ * @author Aaron Tomb
+ */
+module Primitive::Symmetric::Cipher::Block::McMambo where
+
+type word = [32]
+type state = [4][4]word
+type key = [8]word
+type tweak = [16]word
+type block = [16]word
+
+nand : {a} [a] -> [a] -> [a]
+nand x y = ~(x && y)
+
+nor : {a} [a] -> [a] -> [a]
+nor x y = ~(x || y)
+
+(↑) = nand
+(↓) = nor
+(⊕) = (^)
+(∧) = (&&)
+(∨) = (||)
+
+R : (word, word) -> word
+R (x, c) = x <<< c
+
+T : word -> tweak -> state -> state
+T n t s = s ⊕ (if n == 5 then split t else zero)
+
+
+/**
+ * ```repl
+ * :prove T_bijective
+ * ```
+ */
+property T_bijective t n s s' =
+  (s != s') == (T n t s != T n t s')
+
+/**
+ * ```repl
+ * :prove T_inverse
+ * ```
+ */
+property T_inverse n t s =
+  T n t (T n t s) == s
+
+Q : [4]word -> [4]word
+Q [x0, x1, x2, x3] = [y0, y1, y2, y3]
+  where
+    y1 = x1 ⊕ R (x0 ∧ x2, 7)
+    y2 = x2 ⊕ R (x0 ∨ x3, 9)
+    y3 = x3 ⊕ R (y1 ↑ x0, 13)
+    y0 = x0 ⊕ R (y1 ↓ y2, 18)
+
+/**
+ * ```repl
+ * :prove Q_bijective
+ * ```
+ */
+property Q_bijective x x' =
+  (x != x') == (Q x != Q x')
+
+D : state -> state
+D X = Z
+  where
+    Y = transpose [ Q xs | xs <- X ]
+    Z = transpose [ Q ys | ys <- Y ]
+
+D' : state -> state
+D' X = Z
+  where
+    Y = [ Q xs | xs <- transpose X ]
+    Z = [ Q ys | ys <- transpose Y ]
+
+D_verbose : state -> state
+D_verbose [ [ x0,  x1,  x2,  x3]
+          , [ x4,  x5,  x6,  x7]
+          , [ x8,  x9, x10, x11]
+          , [x12, x13, x14, x15] ] = Z
+  where
+    [ y0,  y1,  y2,  y3] = Q [ x0,  x1,  x2,  x3]
+    [ y4,  y5,  y6,  y7] = Q [ x4,  x5,  x6,  x7]
+    [ y8,  y9, y10, y11] = Q [ x8,  x9, x10, x11]
+    [y12, y13, y14, y15] = Q [x12, x13, x14, x15]
+    [ z0,  z4,  z8, z12] = Q [ y0,  y4,  y8, y12]
+    [ z1,  z5,  z9, z13] = Q [ y1,  y5,  y9, y13]
+    [ z2,  z6, z10, z14] = Q [ y2,  y6, y10, y14]
+    [ z3,  z7, z11, z15] = Q [ y3,  y7, y11, y15]
+    Z = [ [ z0,  z1,  z2,  z3]
+        , [ z4,  z5,  z6,  z7]
+        , [ z8,  z9, z10, z11]
+        , [z12, z13, z14, z15] ]
+
+D'_verbose : state -> state
+D'_verbose [ [ x0,  x1,  x2,  x3]
+           , [ x4,  x5,  x6,  x7]
+           , [ x8,  x9, x10, x11]
+           , [x12, x13, x14, x15] ] = Z
+  where
+    [ y0,  y4,  y8, y12] = Q [ x0,  x4,  x8, x12]
+    [ y1,  y5,  y9, y13] = Q [ x1,  x5,  x9, x13]
+    [ y2,  y6, y10, y14] = Q [ x2,  x6, x10, x14]
+    [ y3,  y7, y11, y15] = Q [ x3,  x7, x11, x15]
+    [ z0,  z1,  z2,  z3] = Q [ y0,  y1,  y2,  y3]
+    [ z4,  z5,  z6,  z7] = Q [ y4,  y5,  y6,  y7]
+    [ z8,  z9, z10, z11] = Q [ y8,  y9, y10, y11]
+    [z12, z13, z14, z15] = Q [y12, y13, y14, y15]
+    Z = [ [ z0,  z1,  z2,  z3]
+        , [ z4,  z5,  z6,  z7]
+        , [ z8,  z9, z10, z11]
+        , [z12, z13, z14, z15] ]
+
+/**
+ * ```repl
+ * :prove D_matches
+ * ```
+ */
+property D_matches =
+  D === D_verbose
+
+/**
+ * ```repl
+ * :prove D'_matches
+ * ```
+ */
+property D'_matches =
+  D' === D'_verbose
+
+// Not yet true
+/*property*/
+D_D'_correct s =
+  D' (D s) == s
+
+K : key -> word -> state -> state
+K [k0, k1, k2, k3, k4, k5, k6, k7] j x =
+  x ⊕ [ [  j, k0,  0, k1 ]
+      , [ k2,  j, k3,  0 ]
+      , [  0, k4,  j, k5 ]
+      , [ k6,  0, k7,  j ]
+      ]
+
+/**
+ * ```repl
+ * :prove K_inverse
+ * ```
+ */
+property K_inverse k j s =
+  K k j (K k j s) == s
+
+C1 : key -> tweak -> state -> state
+C1 k t s0 = K k 0 (T 1 t (D (K k 1 (T 0 t (D (K k 0 s0))))))
+
+C : key -> tweak -> state -> state
+C k t s0 = K k 0 (ss!0)
+  where
+    ss : [13]state
+    ss = [s0] # [ T n t (D (K k n s)) | s <- ss | n <- [0..11] ]
+
+C' : key -> tweak -> state -> state
+C' k t s0 = ss!0
+  where
+    ss : [13]state
+    ss = [K k 0 s0] # [ K k n (D' (T n t s)) | s <- ss | n <- reverse [0..11] ]
+
+from_bytes : {a} [a*4][8] -> [a][32]
+from_bytes bytes = [ join (reverse xs) | (xs : [4][8]) <- blocks ]
+  where blocks : [a][4][8]
+        blocks = split bytes
+
+to_bytes : {a} [a][32] -> [a*4][8]
+to_bytes words = join [ reverse (split word : [4][8]) | word <- words ]
+
+/**
+ * ```repl
+ * :prove from_to_bytes
+ * ```
+ */
+property from_to_bytes (words : [16][32]) =
+  from_bytes (to_bytes words) == words
+
+/**
+ * ```repl
+ * :prove to_from_bytes
+ * ```
+ */
+property to_from_bytes (bytes : [64][8]) =
+  to_bytes (from_bytes bytes) == bytes
+
+// Not yet true
+/*property*/
+C_C'_correct k t s0 =
+  C' k t (C k t s0) == s0
+
+pad : {n, b} (fin n, b == (n+8) /^ 512) => [n] -> [b][512]
+pad m = split (m # 0x01 # zero)
+
+pad_bytes : {n, b} (fin n, b == (n+1) /^ 64) => [n][8] -> [b*64][8]
+pad_bytes m = m # [0x01] # zero
+
+Mambo : key -> tweak -> block -> block
+Mambo k t m = join (C k t (split m))
+
+Mambo' : key -> tweak -> block -> block
+Mambo' k t m = join (C' k t (split m))
+
+Mambo_bytes : [_][8] -> [_][8] -> [_][8] -> _
+Mambo_bytes k t m = to_bytes (Mambo (from_bytes k) (from_bytes t) (from_bytes m))
+
+Mambo_bytes' : [_][8] -> [_][8] -> [_][8] -> _
+Mambo_bytes' k t m = to_bytes (Mambo' (from_bytes k) (from_bytes t) (from_bytes m))
+
+/**
+ * ```repl
+ * :prove Mambo_test
+ * ```
+ */
+property Mambo_test =
+  join (Mambo_bytes ("Me" # zero) ("Try" # zero) ("Test" # zero)) ==
+  0xeb514a1ff2609f3a81ccfdd5e5342dba332d7b159a1571cee66d14bb6fd48ceb1ae956a91d3f54c8a545262c26611245a917d0a1582ecbc1d397b612baf7a62d
+
+McMambo k ad npub M = undefined
+  where
+    Us = [zero] # [ u ^ Mambo_bytes k u a | u <- Us | a <- split (pad_bytes ad) ]
+    τ = Mambo_bytes k (Us!0) npub
+    u' = (Us!0) ^ τ
+    Cs = [ Mambo_bytes k u m | u <- undefined | m <- split (pad_bytes M # τ)]

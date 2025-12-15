@@ -1,0 +1,172 @@
+/**
+ * @copyright Galois Inc.
+ * @author Nichole Schimanski <nls@galois.com>
+ * @author Marcella Hastings <marcella@galois.com>
+ * @author Ryan Scott <rscott@galois.com>
+ * www.cryptol.net
+*/
+
+module Primitive::Keyless::Generator::DRBG where
+
+import Primitive::Symmetric::Cipher::Block::AES::Instantiations::AES256 as AES256
+
+type keylen   = AES256::KeySize // bits
+type blocklen = 128 // bits
+type seedlen  = 384 // bits, 384 bits fixed by table 3 for AES-256
+type reseed_limit = 2 ^^ 35 // max number of bytes to generate before reseeding
+
+type blocksize = 16 // blocklen / 8
+type keysize = 32 // keylen / 8
+type seedsize = 48
+
+type cipher_ctx = { key : [keylen] }
+
+block_encrypt : [keylen] -> [blocklen] -> [blocklen]
+block_encrypt key data = AES256::encrypt key data
+
+type s2n_drbg =
+  { bytes_used : [64]
+  , ctx : cipher_ctx
+  , v : [blocklen]
+  }
+
+drbg_generate_internal : {n, blocks}
+                         ( fin n, fin blocks, n >= 1, n <= 8192
+                         , n == blocklen * blocks)
+                      => s2n_drbg
+                      -> ([n], s2n_drbg)
+drbg_generate_internal drbg =
+  (join [ block_encrypt drbg.ctx.key (drbg.v + i) | i <- [1 .. blocks]], drbg')
+    where drbg' = { bytes_used = drbg.bytes_used + `(blocks * blocksize)
+                  , ctx = drbg.ctx
+                  , v = drbg.v + `blocks
+                  }
+
+drbg_instantiate : {ps_size}
+                   (fin ps_size)
+                => [seedlen]
+                -> [ps_size]
+                -> s2n_drbg
+drbg_instantiate entropy ps = drbg_reseed zero entropy ps'
+  where
+    /* pad ps with zeros if needed to reach seedlen
+       otherwise truncate to seedlen */
+    ps' = take `{seedlen} (ps # (zero : [seedlen]))
+
+/* Should bytes used be reset before the update? s2n doesn't
+   it seems like the NIST spec counts that update as the first
+
+   we limit ps_size to a maximum of seedlen because this is an
+   implementation specific choice made by s2n*/
+drbg_reseed : {ps_size}
+              (ps_size <= seedlen)
+           => s2n_drbg
+           -> [seedlen]
+           -> [ps_size]
+	   -> s2n_drbg
+drbg_reseed drbg entropy ps = drbg''
+  where
+    drbg' = drbg_update (entropy ^ (ps # zero)) drbg
+    drbg'' = { v = drbg'.v, ctx = drbg'.ctx, bytes_used = 0}
+
+drbg_uninstantiate : s2n_drbg -> s2n_drbg
+drbg_uninstantiate drbg = zero
+
+/* This is the spec of the s2n code, in that it reseeds automatically
+   if reseed is required. This is in opposition to the spec, which
+   requires an error code.
+
+   We are curious about why s2n_drbg counts a number of bytes used,
+   while the spec tracks a number of calls to generate. We don't
+   belive that this is buggy behavior, since if we call the maximum
+   size with generate each time, we will reseed before the spec would
+   require it. */
+drbg_generate : {n, blocks} (fin n, fin blocks, n >= 1, n <= 8192,
+                             blocks * blocklen >= n,
+                             (blocks - 1) * blocklen <= n - 1) =>
+                s2n_drbg -> [seedlen] -> Bit ->
+                ([n], s2n_drbg)
+drbg_generate drbg entropy reseed_p = (take enc_result, drbg_out)
+  where
+    // Re-seed if we have exceeded the limit, or if reseed_p is set
+    drbg_r =
+      if reseed_p \/ drbg.bytes_used + `n * 8 + `blocklen * 8 >= `reseed_limit then
+        drbg_reseed drbg entropy (zero : [256])
+      else drbg
+    // Encrypt v+1, v+2, ..., v + ceil (n / blocklen)
+    (enc_result, drbg_v) = drbg_generate_internal `{blocks=blocks} drbg_r
+    // Update the drbg state
+    drbg_out = drbg_update zero drbg_v
+
+/* What is ctr_len? We think it is >= blocklen, so
+   we go to the else branch of 2.1 every time */
+drbg_update : [seedlen] -> s2n_drbg -> s2n_drbg
+drbg_update data drbg = result
+  where
+    // NOTE: blocklen * seedlen / blocklen is seedlen in our case, but might be
+    // different if seedlen isn't a multiple of blocklen
+    type blocks = (seedlen + blocklen -1)/blocklen
+    // Encrypt v+1, v+2, ..., v + ceil (seedlen / blocklen)
+    (enc_result, _) = drbg_generate_internal `{blocks=blocks} drbg
+    // XOR the additional input data with the first bits of enc_result
+    data_xor = (take enc_result) ^ data
+    // Return the first half of data_xor as the new key, and the last half of it
+    // as the new value for v
+    result = { bytes_used = drbg.bytes_used + (`blocks * `blocksize)
+             , ctx = { key = take data_xor }
+             , v = drop data_xor
+             }
+
+
+/* Example test vectors from
+
+   https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Program/Random-Number-Generators
+
+   for CTR_DRBG.
+*/
+
+/* [AES-256 no df]
+   [PredictionResistance = False]
+   [EntropyInputLen = 384]
+   [NonceLen = 0]
+   [PersonalizationStringLen = 0]
+   [AdditionalInputLen = 0]
+   [ReturnedBitsLen = 512] <- value of type parameter n
+*/
+
+
+
+testInstantiate0 = {entropy = 0xe4bc23c5089a19d86f4119cb3fa08c0a4991e0a1def17e101e4c14d9c323460a7c2fb58e0b086c6c57b55f56cae25bad,
+                    pString = zero : [0],
+                        Key = 0xb7b3a93ecfdf2f61c622ad3afb6bff818736a09c9391157e1902d10a79d0db12,
+                               V = 0x0e4fb6443cae46188617aad8bfe46e23}
+
+testInstantiatedrbg0 = drbg_instantiate`{ps_size=0} testInstantiate0.entropy testInstantiate0.pString
+
+testInstantiate0Pass = testInstantiatedrbg0.v == testInstantiate0.V /\ testInstantiatedrbg0.ctx.key == testInstantiate0.Key
+
+testReseed0 = {entropyReseed = 0xfd85a836bba85019881e8c6bad23c9061adc75477659acaea8e4a01dfe07a1832dad1c136f59d70f8653a5dc118663d6,
+                          Key = 0xd230044c2594510d195ffe9923de8848bdbd19f24d0e7558b28e55b2d4de7841,
+                                V = 0xe18637ff12f514f37adc2013a40f38c1}
+
+testReseed0Pass = drbgreseed.v == testReseed0.V /\ drbgreseed.ctx.key == testReseed0.Key
+                where drbgreseed = drbg_reseed`{ps_size=0} testInstantiatedrbg0 testReseed0.entropyReseed zero
+
+testGenerate0 = {      Key = 0xec871bb7a4f2c45dccdd0e514a21628959aa21e9643934f619b2709b3e38697c,
+                       V   = 0xd8bbe7bfc60bfb710f39acd1088c9f41}
+
+testGeneratedrbg0 = (drbg_generate`{n=512} testInstantiatedrbg0 testReseed0.entropyReseed True).1
+
+testGenerate0Pass = testGeneratedrbg0.v == testGenerate0.V // /\ testGeneratedrbg0.ctx.key == testGenerate0.Key
+
+testGenerateSnd0 = {returnedBits = 0xb2cb8905c05e5950ca31895096be29ea3d5a3b82b269495554eb80fe07de43e193b9e7c3ece73b80e062b1c1f68202fbb1c52a040ea2478864295282234aaada,
+                       Key = 0xe728308a0e92cbacb269d12246d8e2d24cf5fcc678aa09564132e4972c456eda,
+                       V   = 0xc95f38da34ecb65ebf8b34c32bc215a5}
+
+testGenerateSnd0Pass = and [ result == testGenerateSnd0.returnedBits
+                           , drbg.ctx.key == testGenerateSnd0.Key
+                           , drbg.v == testGenerateSnd0.V ]
+                     where (result,drbg) = drbg_generate`{n=512} testGeneratedrbg0 zero False
+
+
+property testsPass = and [testInstantiate0Pass, testReseed0Pass, testGenerate0Pass, testGenerateSnd0Pass]
