@@ -1,0 +1,118 @@
+enable_experimental;
+import "F:/研1/PQC算法验证与优化/Kyber一致性验证/OpenHiTLS-ML-KEM/cryptol/ml_kem_pke/hash/hash.cry" as Model;
+
+// 加载编译好的 LLVM Bitcode 文件
+// TODO 暂时为获得改文件
+mod <- llvm_load_module "hash.bc";
+
+// 2. 定义辅助函数
+// 定义一个通用的指针类型 (void*)
+let i8p = llvm_array 0 (llvm_int 8);
+// 3. 编写验证规格 (Specification)
+
+/**
+ * 验证 HashFuncH (SHA3-256)
+ * 输入长度: in_len (由参数传入，方便测试不同长度)
+ * 输出长度: 固定 32 字节
+ */
+let HashFuncH_spec in_len = do {
+    let libCtx = llvm_null; 
+
+    // 2. 设置输入数据 "in"
+    // ptr_to_fresh_readonly: 创建一个指向"符号化数据"的指针
+    // "in_data" 是我们在数学证明中使用的变量名
+    // llvm_array in_len (llvm_int 8): 数据的类型是 in_len 长的字节数组
+    (in_ptr, in_data) <- ptr_to_fresh_readonly "in_data" (llvm_array in_len (llvm_int 8));
+
+    // 3. 设置输出指针 "out"
+    // 分配 32 字节的内存来接收结果
+    out_ptr <- llvm_alloc (llvm_array 32 (llvm_int 8));
+
+    
+    // 4. 调用 C 函数: HashFuncH(libCtx, in, inLen, out, outLen)
+    // 注意：这里最后一个参数我们传入 32，因为 H 函数就是定长输出
+    llvm_execute_func [libCtx, in_ptr, llvm_term in_len, out_ptr, llvm_term 32];
+
+    // 5. 验证 C 函数的返回值 (int32_t)
+    // 假设 EAL_Md 返回 0 表示成功
+    llvm_return (llvm_int 32 0); 
+
+    // 6. 关键：验证 out_ptr 指向的内存内容
+    // 它必须等于 Cryptol 模型 Model::HashFuncH 对 in_data 的计算结果
+    llvm_points_to out_ptr (cryptol_term {{ Model::HashFuncH in_data }});
+};
+
+/**
+ * 验证 HashFuncG (SHA3-512)
+ * 输出长度: 固定 64 字节
+ */
+let HashFuncG_spec in_len = do {
+    let libCtx = llvm_null;
+    (in_ptr, in_data) <- ptr_to_fresh_readonly "in_data" (llvm_array in_len (llvm_int 8));
+    // G 输出 64 字节
+    out_ptr <- llvm_alloc (llvm_array 64 (llvm_int 8));
+    // 调用 C 函数，要求输出 64 字节
+    llvm_execute_func [libCtx, in_ptr, llvm_term in_len, out_ptr, llvm_term 64];
+    llvm_return (llvm_int 32 0);
+    // 验证结果等于 Model::HashFuncG
+    llvm_points_to out_ptr (cryptol_term {{ Model::HashFuncG in_data }});
+};
+
+/**
+ * 验证 HashFuncJ (SHAKE256 - Fixed 32 bytes for ML-KEM)
+ * 即使 C 允许任意长度，我们这里只验证它作为 "J" 使用时(outLen=32)的正确性
+ */
+let HashFuncJ_spec in_len = do {
+    let libCtx = llvm_null;
+    (in_ptr, in_data) <- ptr_to_fresh_readonly "in_data" (llvm_array in_len (llvm_int 8));
+    
+    // J 在协议中固定输出 32 字节
+    out_ptr <- llvm_alloc (llvm_array 32 (llvm_int 8));
+
+    // 调用时显式传入 32
+    llvm_execute_func [libCtx, in_ptr, llvm_term in_len, out_ptr, llvm_term 32];
+
+    llvm_return (llvm_int 32 0);
+    llvm_points_to out_ptr (cryptol_term {{ Model::HashFuncJ in_data }});
+};
+
+/**
+ * 验证 PRF (SHAKE256 - Variable Length)
+ * 由于 SAW 需要在分配内存时知道具体大小，我们把 out_len 作为 spec 的参数
+ */
+let PRF_spec in_len out_len = do {
+    let libCtx = llvm_null;
+    
+    // PRF 输入: extSeed
+    (seed_ptr, seed_data) <- ptr_to_fresh_readonly "extSeed" (llvm_array in_len (llvm_int 8));
+    
+    // PRF 输出: outBuf (长度由参数 out_len 决定)
+    out_ptr <- llvm_alloc (llvm_array out_len (llvm_int 8));
+
+    // 调用 C 函数: PRF(ctx, seed, seedLen, out, outLen)
+    llvm_execute_func [libCtx, seed_ptr, llvm_term in_len, out_ptr, llvm_term out_len];
+
+    llvm_return (llvm_int 32 0);
+
+    // 验证: 
+    // 这里需要用到 Cryptol 的 take 或者指定类型，因为 PRF 是变长的
+    // 我们用 `{outLen=out_len} 显式告诉 Cryptol 我们期望的长度
+    llvm_points_to out_ptr (cryptol_term {{ Model::PRF`{outLen=out_len} seed_data }});
+};
+
+print "开始验证 HashFuncH (SHA3-256)...";
+llvm_verify mod "HashFuncH" [] (HashFuncH_spec 32) z3;
+
+print "开始验证 HashFuncG (SHA3-512)...";
+// 验证 HashFuncG，输入长度设为 32 字节
+llvm_verify mod "HashFuncG" [] (HashFuncG_spec 32) z3;
+
+print "开始验证 HashFuncJ (SHAKE256-32)...";
+// 验证 HashFuncJ，输入长度设为 32 字节
+llvm_verify mod "HashFuncJ" [] (HashFuncJ_spec 32) z3;
+
+print "开始验证 PRF (SHAKE256-Variable)...";
+// 验证 PRF，输入 33 字节 (32 seed + 1 nonce)，输出 128 字节 (eta=2的情况)
+llvm_verify mod "PRF" [] (PRF_spec 33 128) z3;
+
+print "全部验证完成！";

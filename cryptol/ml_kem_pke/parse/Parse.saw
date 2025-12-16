@@ -1,0 +1,44 @@
+enable_experimental;
+import "Parse.cry" as Model;
+mod <- llvm_load_module "Parse.bc";
+
+// 辅助函数
+let ptr_to_fresh_readonly name type = do {
+    x <- llvm_fresh_var name type;
+    p <- llvm_alloc_readonly type;
+    llvm_points_to p (llvm_term x);
+    return (p, x);
+};
+
+let Parse_spec = do {
+    // 拒绝采样策略
+    let arrayLen = 1000;
+    let n = 256;
+
+    // 输入
+    (arrayB_ptr, arrayB_val) <- ptr_to_fresh_readonly "arrayB" (llvm_array arrayLen (llvm_int 8));
+    
+    // 输出
+    polyNtt_ptr <- llvm_alloc (llvm_array n (llvm_int 16));
+
+    // 执行
+    llvm_execute_func [
+        polyNtt_ptr, 
+        arrayB_ptr, 
+        llvm_term {{ `arrayLen : [32] }}, 
+        llvm_term {{ `n : [32] }}
+    ];
+
+    // 返回值验证
+    llvm_return (llvm_term {{ 0 : [32] }});
+
+    // 输出内存验证
+    llvm_points_to polyNtt_ptr (llvm_term {{ 
+        [ fromInteger (fromZ c) : [16] 
+        | c <- Model::Parse arrayB_val 
+        ] 
+    }});
+};
+
+print "开始验证 Parse 函数...";
+llvm_verify mod "Parse" [] false Parse_spec z3;
