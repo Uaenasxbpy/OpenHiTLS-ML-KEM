@@ -4,7 +4,7 @@ module Parse where
 // 1. 常量定义
 // -----------------------------------------------------------------------------
 type q = 3329
-type n = 256
+// type n = 256
 type Zq = Z q
 type Byte = [8]
 
@@ -59,8 +59,16 @@ GenerateStream bytes = result
  * 输入: 有限长度的字节数组
  * 输出: 固定长度 n=256 的系数数组
  */
-Parse : {inLen} (fin inLen) => [inLen]Byte -> [n]Zq
+Parse : {n, inLen} (fin n, fin inLen) => [inLen]Byte -> [n]Zq
 Parse input = take`{n} (GenerateStream infinite_input)
     where
         // 补零以构造无限输入流
         infinite_input = input # zero
+
+// 判断 3 个字节是否能生成 2 个合法的系数（即不需要拒绝采样）
+IsHappyBlock : [3]Byte -> Bit
+IsHappyBlock bytes = d1_ok && d2_ok
+    where
+        [raw1, raw2] = BytesToUint12 bytes
+        d1_ok = raw1 < `q
+        d2_ok = raw2 < `q
