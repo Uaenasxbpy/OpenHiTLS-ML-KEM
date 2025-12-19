@@ -1,0 +1,119 @@
+module Encode_Decode where
+
+// -----------------------------------------------------------------------------
+// 1. 常量定义
+// -----------------------------------------------------------------------------
+
+type n = 256
+type q = 3329
+
+// -----------------------------------------------------------------------------
+// 2. 通用编解码逻辑 (Generic Implementation)
+//    这里实现了 FIPS 203 算法 4 (ByteEncode) 和 算法 5 (ByteDecode)
+// -----------------------------------------------------------------------------
+
+/**
+ * 通用 ByteEncode 函数
+ * 输入: 256 个 d-bit 的系数
+ * 输出: 32 * d 个字节
+ * 逻辑: 系数 -> 比特流(LittleEndian) -> 字节数组
+ */
+ByteEncode : {d} (fin d, d >= 1, d <= 12) => [n][d] -> [32 * d][8]
+ByteEncode coeffs = bytes
+    where
+        // 1. [Cryptol default] 系数是 Big-Endian ([d-1 ... 0])
+        //    我们需要将其转为 Little-Endian Stream，所以先 reverse 每个系数的位
+        //    Example: 3 (011) -> (110)
+        le_coeffs = [ reverse c | c <- coeffs ]
+
+        // 2. 将所有系数的位流拼接在一起
+        //    join 后，比特流的顺序对应 FIPS 203 中的 b0, b1, b2...
+        bit_stream = join le_coeffs
+
+        // 3. 将比特流每 8 位切成一段
+        raw_bytes = split`{parts=32*d} bit_stream
+
+        // 4. 每个 8-bit 片段目前是 LSB first (b0...b7)
+        //    但 Cryptol (以及计算机) 的 Byte 定义通常是 MSB first。
+        //    所以我们需要再次 reverse，把它们变回正常的 Byte 值。
+        bytes = [ reverse b | b <- raw_bytes ]
+
+
+/**
+ * 通用 ByteDecode 函数
+ * 输入: 32 * d 个字节
+ * 输出: 256 个 d-bit 的系数
+ * 逻辑: 字节数组 -> 比特流 -> 切分 -> 还原系数
+ */
+ByteDecode : {d} (fin d, d >= 1, d <= 12) => [32 * d][8] -> [n][d]
+ByteDecode bytes = coeffs
+    where
+        // 1. 将输入的 Byte (MSB first) 翻转为 LSB first 的比特块
+        raw_bytes = [ reverse b | b <- bytes ]
+
+        // 2. 拼接成完整的比特流
+        bit_stream = join raw_bytes
+
+        // 3. 按照 d-bit 一组进行切分
+        raw_coeffs = split`{parts=n} bit_stream
+
+        // 4. 切出来的 d-bit 块是 LSB first 的，翻转回 Cryptol 标准的 MSB first
+        coeffs = [ reverse c | c <- raw_coeffs ]
+
+
+// -----------------------------------------------------------------------------
+// 3. 针对不同位宽的包装 (Wrappers for SAW Verification)
+//    这些函数专门对应 C 代码中的 EncodeBits1, EncodeBits4 等函数
+// -----------------------------------------------------------------------------
+
+// --- Encode Wrappers ---
+
+EncodeBits1 : [n][1] -> [32][8]
+EncodeBits1 = ByteEncode`{d=1}
+
+EncodeBits4 : [n][4] -> [128][8]
+EncodeBits4 = ByteEncode`{d=4}
+
+EncodeBits5 : [n][5] -> [160][8]
+EncodeBits5 = ByteEncode`{d=5}
+
+EncodeBits10 : [n][10] -> [320][8]
+EncodeBits10 = ByteEncode`{d=10}
+
+EncodeBits11 : [n][11] -> [352][8]
+EncodeBits11 = ByteEncode`{d=11}
+
+EncodeBits12 : [n][12] -> [384][8]
+EncodeBits12 = ByteEncode`{d=12}
+
+// --- Decode Wrappers ---
+
+DecodeBits1 : [32][8] -> [n][1]
+DecodeBits1 = ByteDecode`{d=1}
+
+DecodeBits4 : [128][8] -> [n][4]
+DecodeBits4 = ByteDecode`{d=4}
+
+DecodeBits5 : [160][8] -> [n][5]
+DecodeBits5 = ByteDecode`{d=5}
+
+DecodeBits10 : [320][8] -> [n][10]
+DecodeBits10 = ByteDecode`{d=10}
+
+DecodeBits11 : [352][8] -> [n][11]
+DecodeBits11 = ByteDecode`{d=11}
+
+DecodeBits12 : [384][8] -> [n][12]
+DecodeBits12 = ByteDecode`{d=12}
+
+
+// -----------------------------------------------------------------------------
+// 4. 辅助验证函数 (Helper for DecodeBits12 Overflow Check)
+//    C 函数 DecodeBits12 包含了一个 >= MLKEM_Q 的检查。
+//    我们需要一个 Cryptol 函数来模拟这个检查逻辑。
+// -----------------------------------------------------------------------------
+
+// 检查解码出来的 256 个数中，是否所有的数都严格小于 q (3329)
+// 如果全部小于 q，返回 True (Success)，否则返回 False (Error)
+CheckBounds12 : [n][12] -> Bit
+CheckBounds12 coeffs = all (\x -> x < `q) coeffs

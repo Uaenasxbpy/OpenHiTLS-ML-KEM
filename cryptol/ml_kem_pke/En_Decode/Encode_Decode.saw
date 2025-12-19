@@ -1,0 +1,151 @@
+enable_experimental;
+
+// 1. 加载资源
+import "Encode_Decode.cry" as Model;
+mod <- llvm_load_module "Encode_Decode.bc";
+
+// -----------------------------------------------------------------------------
+// 2. 辅助函数
+// -----------------------------------------------------------------------------
+
+// 标准的符号变量分配函数
+let ptr_to_fresh_readonly name type = do {
+    x <- llvm_fresh_var name type;
+    p <- llvm_alloc_readonly type;
+    llvm_points_to p (llvm_term x);
+    return (p, x);
+};
+
+// -----------------------------------------------------------------------------
+// 3. 通用 Encode 验证模版 (Generator for Encode)
+// -----------------------------------------------------------------------------
+
+/**
+ * 自动生成 EncodeBitsX 的验证规格
+ * d: 位宽 (1, 4, 5, 10, 11, 12)
+ * func_name: C 函数名 (例如 "EncodeBits4")
+ */
+let encode_spec d = do {
+    // 常量定义
+    let n = 256;
+    // 计算输出字节数: (256 * d) / 8 = 32 * d
+    let out_bytes = eval_int {{ 32 * `d : [32] }}; 
+
+    // --- 输入: polyF (uint16_t array) ---
+    // 技巧: 我们在 Cryptol 层面创建 d-bit 的变量，防止产生越界数据
+    // 然后在传入 C 内存时，zext 成 16-bit
+    polyF_val <- llvm_fresh_var "polyF" (llvm_array n (llvm_int d));
+    polyF_ptr <- llvm_alloc_readonly (llvm_array n (llvm_int 16));
+    
+    // 将 d-bit 的符号变量扩展为 16-bit 放入内存
+    llvm_points_to polyF_ptr (llvm_term {{ [ zext v : [16] | v <- polyF_val ] }});
+
+    // --- 输出: r (uint8_t array) ---
+    r_ptr <- llvm_alloc (llvm_array out_bytes (llvm_int 8));
+
+    // --- 执行 C 函数 ---
+    // void EncodeBitsX(uint8_t *r, uint16_t *polyF)
+    llvm_execute_func [r_ptr, polyF_ptr];
+
+    // --- 验证 ---
+    // 验证 Cryptol 模型 ByteEncode 的结果
+    llvm_points_to r_ptr (llvm_term {{ Model::ByteEncode`{d=d} polyF_val }});
+};
+
+// -----------------------------------------------------------------------------
+// 4. 通用 Decode 验证模版 (Generator for Decode 1,4,5,10,11)
+//    注意: d=12 有返回值处理，单独写
+// -----------------------------------------------------------------------------
+
+let decode_spec d = do {
+    let n = 256;
+    let in_bytes = eval_int {{ 32 * `d : [32] }};
+
+    // --- 输入: a (uint8_t array) ---
+    (a_ptr, a_val) <- ptr_to_fresh_readonly "a" (llvm_array in_bytes (llvm_int 8));
+
+    // --- 输出: polyF (int16_t array) ---
+    polyF_ptr <- llvm_alloc (llvm_array n (llvm_int 16));
+
+    // --- 执行 C 函数 ---
+    // void DecodeBitsX(int16_t *polyF, const uint8_t *a)
+    llvm_execute_func [polyF_ptr, a_ptr];
+
+    // --- 验证 ---
+    // 验证结果等于 Model::ByteDecode
+    // 同样需要把 d-bit 的结果 zext 成 16-bit 对比
+    llvm_points_to polyF_ptr (llvm_term {{ 
+        [ zext c : [16] | c <- Model::ByteDecode`{d=d} a_val ] 
+    }});
+};
+
+// -----------------------------------------------------------------------------
+// 5. DecodeBits12 专用模版 (Happy Path)
+//    DecodeBits12 会检查数值是否 >= 3329，我们需要验证成功路径
+// -----------------------------------------------------------------------------
+
+let decode12_spec = do {
+    let d = 12;
+    let n = 256;
+    let in_bytes = 384; // 32 * 12
+
+    // --- 输入 ---
+    (a_ptr, a_val) <- ptr_to_fresh_readonly "a" (llvm_array in_bytes (llvm_int 8));
+
+    // 【前置条件】
+    // 假设输入的数据解码后，所有系数都 < q (3329)
+    // 这样 C 函数才会返回 SUCCESS，而不是 ERROR
+    llvm_precond {{ Model::CheckBounds12 (Model::ByteDecode`{d=12} a_val) }};
+
+    // --- 输出 ---
+    polyF_ptr <- llvm_alloc (llvm_array n (llvm_int 16));
+
+    // --- 执行 ---
+    // int32_t DecodeBits12(...)
+    llvm_execute_func [polyF_ptr, a_ptr];
+
+    // --- 验证返回值 ---
+    // 必须返回 0 (CRYPT_SUCCESS)
+    llvm_return (llvm_term {{ 0 : [32] }});
+
+    // --- 验证内存 ---
+    llvm_points_to polyF_ptr (llvm_term {{ 
+        [ zext c : [16] | c <- Model::ByteDecode`{d=12} a_val ] 
+    }});
+};
+
+// -----------------------------------------------------------------------------
+// 6. 批量运行证明
+// -----------------------------------------------------------------------------
+
+// 定义一个 helper 来跑 Encode 证明
+let prove_encode d name = do {
+    print (str_concat "Verifying " name);
+    llvm_verify mod name [] false (encode_spec d) z3;
+};
+
+// 定义一个 helper 来跑 Decode 证明
+let prove_decode d name = do {
+    print (str_concat "Verifying " name);
+    llvm_verify mod name [] false (decode_spec d) z3;
+};
+
+print "=== Starting Encode serious functions ===";
+prove_encode 1  "EncodeBits1";
+prove_encode 4  "EncodeBits4";
+prove_encode 5  "EncodeBits5";
+prove_encode 10 "EncodeBits10";
+prove_encode 11 "EncodeBits11";
+prove_encode 12 "EncodeBits12";
+
+print "=== Starting Decode serious functions ===";
+prove_decode 1  "DecodeBits1";
+prove_decode 4  "DecodeBits4";
+prove_decode 5  "DecodeBits5";
+prove_decode 10 "DecodeBits10";
+prove_decode 11 "DecodeBits11";
+
+print "Verifying DecodeBits12 (Happy Path)";
+llvm_verify mod "DecodeBits12" [] false decode12_spec z3;
+
+print "=== Successfully Verified (All Green) ===";
