@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小组展示 PPT</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            purple: '#6366F1',
+                            pink: '#EC4899'
+                        }
+                    },
+                    animation: {
+                        'float': 'float 6s ease-in-out infinite',
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'gradient-x': 'gradient-x 15s ease infinite',
+                    },
+                    keyframes: {
+                        float: {
+                            '0%, 100%': { transform: 'translateY(0)' },
+                            '50%': { transform: 'translateY(-20px)' },
+                        },
+                        'gradient-x': {
+                            '0%, 100%': { 'background-position': '0% 50%' },
+                            '50%': { 'background-position': '100% 50%' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        /* 全局样式与自定义动画 */
+        body {
+            font-family: 'Inter', 'Microsoft YaHei', sans-serif;
+            overflow: hidden; /* 防止滚动 */
+        }
+
+        /* 动态背景 */
+        .animated-bg {
+            background: linear-gradient(-45deg, #0f172a, #1e1b4b, #312e81, #0f172a);
+            background-size: 400% 400%;
+            animation: gradient-x 15s ease infinite;
+        }
+
+        /* 玻璃拟态卡片通用样式 */
+        .glass-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        /* 激活状态的卡片样式 (用于 JS 自动轮播) */
+        .glass-card.auto-active {
+             background: rgba(255, 255, 255, 0.12);
+             transform: scale(1.05) translateY(-8px);
+             box-shadow: 0 20px 40px -15px rgba(99, 102, 241, 0.3);
+        }
+
+        /* 幻灯片过渡逻辑 */
+        .slide {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transform: scale(0.95) translateY(20px);
+            transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1), 
+                        transform 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+            z-index: 0;
+        }
+
+        .slide.active {
+            opacity: 1;
+            transform: scale(1) translateY(0);
+            pointer-events: auto;
+            z-index: 10;
+        }
+
+        /* 元素入场动画 - 只有在 active 时触发 */
+        .slide.active .stagger-1 { animation: slideInUp 0.8s 0.1s forwards cubic-bezier(0.34, 1.56, 0.64, 1); opacity: 0; }
+        .slide.active .stagger-2 { animation: slideInUp 0.8s 0.2s forwards cubic-bezier(0.34, 1.56, 0.64, 1); opacity: 0; }
+        .slide.active .stagger-3 { animation: slideInUp 0.8s 0.3s forwards cubic-bezier(0.34, 1.56, 0.64, 1); opacity: 0; }
+        .slide.active .stagger-4 { animation: slideInUp 0.8s 0.4s forwards cubic-bezier(0.34, 1.56, 0.64, 1); opacity: 0; }
+
+        @keyframes slideInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 打字机光标效果 */
+        .typing-cursor::after {
+            content: '|';
+            animation: blink 1s step-end infinite;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
+
+        /* 装饰性光斑 */
+        .blob {
+            position: absolute;
+            filter: blur(80px);
+            z-index: -1;
+            opacity: 0.6;
+            animation: float 8s infinite ease-in-out;
+        }
+    </style>
+</head>
+<body class="text-white h-screen w-screen animated-bg selection:bg-brand-purple selection:text-white">
+
+    <div class="blob w-96 h-96 bg-brand-purple rounded-full top-0 left-0 -translate-x-1/2 -translate-y-1/2"></div>
+    <div class="blob w-80 h-80 bg-brand-pink rounded-full bottom-0 right-0 translate-x-1/3 translate-y-1/3 animation-delay-2000"></div>
+
+    <main id="app" class="relative w-full h-full">
+
+        <section class="slide active" id="slide-0">
+            <h1 class="text-6xl md:text-7xl font-bold mb-20 text-transparent bg-clip-text bg-gradient-to-r from-brand-purple to-brand-pink stagger-1 tracking-wider">
+                小组成员
+            </h1>
+            
+            <div id="member-cards-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 w-full max-w-7xl px-4 stagger-2">
+                <div class="glass-card rounded-3xl p-10 flex flex-col items-center justify-center group cursor-default" data-color="text-brand-pink">
+                    <div class="member-icon w-24 h-24 rounded-full bg-gradient-to-br from-brand-purple to-brand-pink flex items-center justify-center mb-8 shadow-lg transition-all duration-300 group-hover:animate-pulse-slow">
+                        <i class="fa-solid fa-user text-4xl text-white"></i>
+                    </div>
+                    <h3 class="member-name text-3xl font-bold transition-colors group-hover:text-brand-pink">熊兵</h3>
+                </div>
+
+                <div class="glass-card rounded-3xl p-10 flex flex-col items-center justify-center group cursor-default" data-color="text-cyan-400">
+                    <div class="member-icon w-24 h-24 rounded-full bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center mb-8 shadow-lg transition-all duration-300 group-hover:animate-pulse-slow">
+                        <i class="fa-solid fa-user-astronaut text-4xl text-white"></i>
+                    </div>
+                    <h3 class="member-name text-3xl font-bold transition-colors group-hover:text-cyan-400">聂睿</h3>
+                </div>
+
+                <div class="glass-card rounded-3xl p-10 flex flex-col items-center justify-center group cursor-default" data-color="text-brand-pink">
+                    <div class="member-icon w-24 h-24 rounded-full bg-gradient-to-br from-brand-pink to-rose-400 flex items-center justify-center mb-8 shadow-lg transition-all duration-300 group-hover:animate-pulse-slow">
+                        <i class="fa-solid fa-user-graduate text-4xl text-white"></i>
+                    </div>
+                    <h3 class="member-name text-3xl font-bold transition-colors group-hover:text-brand-pink">田佳珺</h3>
+                </div>
+
+                <div class="glass-card rounded-3xl p-10 flex flex-col items-center justify-center group cursor-default" data-color="text-violet-400">
+                    <div class="member-icon w-24 h-24 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center mb-8 shadow-lg transition-all duration-300 group-hover:animate-pulse-slow">
+                        <i class="fa-solid fa-user-ninja text-4xl text-white"></i>
+                    </div>
+                    <h3 class="member-name text-3xl font-bold transition-colors group-hover:text-violet-400">周也景</h3>
+                </div>
+            </div>
+        </section>
+
+        <section class="slide" id="slide-1">
+            <h1 class="text-6xl md:text-7xl font-bold mb-16 text-transparent bg-clip-text bg-gradient-to-r from-brand-purple to-brand-pink stagger-1">
+                项目分工
+            </h1>
+
+            <div class="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-3 gap-8 stagger-2">
+                <div class="glass-card rounded-2xl p-8 hover:bg-white/10 transition-colors duration-300">
+                    <div class="flex items-center mb-6">
+                        <i class="fa-solid fa-film text-brand-purple text-3xl mr-4"></i>
+                        <h3 class="text-2xl font-bold">视频剪辑</h3>
+                    </div>
+                    <p class="text-gray-300 text-xl">负责人：<span class="text-white font-bold text-2xl">熊兵</span></p>
+                </div>
+                <div class="glass-card rounded-2xl p-8 hover:bg-white/10 transition-colors duration-300">
+                    <div class="flex items-center mb-6">
+                        <i class="fa-solid fa-camera text-blue-400 text-3xl mr-4"></i>
+                        <h3 class="text-2xl font-bold">素材拍摄与收集</h3>
+                    </div>
+                    <p class="text-gray-300 text-xl">负责人：<span class="text-white font-bold text-2xl">聂睿、周也景</span></p>
+                </div>
+                <div class="glass-card rounded-2xl p-8 hover:bg-white/10 transition-colors duration-300">
+                    <div class="flex items-center mb-6">
+                        <i class="fa-solid fa-microphone-lines text-brand-pink text-3xl mr-4"></i>
+                        <h3 class="text-2xl font-bold">视频旁白与字幕</h3>
+                    </div>
+                    <p class="text-gray-300 text-xl">负责人：<span class="text-white font-bold text-2xl">田佳珺</span></p>
+                </div>
+            </div>
+
+            <div class="mt-10 w-full max-w-6xl stagger-3">
+                <div class="glass-card rounded-2xl p-8 border-l-8 border-brand-purple flex items-center justify-between hover:scale-[1.01] transition-transform">
+                    <div class="flex items-center">
+                        <i class="fa-brands fa-bilibili text-brand-pink text-5xl mr-6 animate-bounce"></i>
+                        <div>
+                            <h4 class="text-2xl font-bold text-gray-200 mb-2">素材来源说明</h4>
+                            <p class="text-gray-400 text-xl">所有视频素材均引用自 B站 (Bilibili) 及相关公开视频平台。</p>
+                        </div>
+                    </div>
+                    <div class="hidden md:block text-brand-purple/50">
+                        <i class="fa-solid fa-quote-right text-5xl"></i>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="slide" id="slide-2">
+            <div class="text-center stagger-1">
+                <div class="flex justify-center gap-8 mb-8 text-5xl text-brand-pink/80">
+                    <i class="fa-solid fa-heart animate-pulse"></i>
+                    <i class="fa-solid fa-hands-clapping animate-bounce" style="animation-duration: 2s;"></i>
+                    <i class="fa-solid fa-heart animate-pulse"></i>
+                </div>
+                <h1 class="text-7xl md:text-9xl font-black mb-6 text-transparent bg-clip-text bg-gradient-to-r from-white via-brand-purple to-brand-pink">
+                    感谢观看
+                </h1>
+                <h2 class="text-3xl md:text-4xl font-light tracking-[0.5em] text-gray-300 uppercase typing-cursor">
+                    Thank You
+                </h2>
+            </div>
+        </section>
+
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- 核心 PPT 切换逻辑 ---
+            const slides = document.querySelectorAll('.slide');
+            const totalSlides = slides.length;
+            let currentSlide = 0;
+            let isTransitioning = false;
+
+            // --- 成员自动轮播逻辑 ---
+            let memberCycleInterval;
+            let currentMemberIndex = 0;
+            const memberCards = document.querySelectorAll('#member-cards-container .glass-card');
+            // 获取所有可能用到的颜色类名，用于后续清除
+            const allColorClasses = Array.from(memberCards).map(card => card.dataset.color);
+
+            // 启动轮播
+            function startMemberCycle() {
+                stopMemberCycle(); // 防止重复启动
+                // 初始延迟一点点，等入场动画完成
+                setTimeout(() => {
+                    cycleStep(); // 立即执行一次
+                    memberCycleInterval = setInterval(cycleStep, 1500); // 每1.5秒切换一次
+                }, 800);
+            }
+
+            // 停止轮播并重置状态
+            function stopMemberCycle() {
+                clearInterval(memberCycleInterval);
+                memberCards.forEach(card => {
+                    card.classList.remove('auto-active');
+                    card.querySelector('.member-icon').classList.remove('animate-pulse-slow');
+                    card.querySelector('.member-name').classList.remove(...allColorClasses);
+                });
+                currentMemberIndex = 0;
+            }
+
+            // 轮播的单步动作
+            function cycleStep() {
+                // 1. 清除上一个卡片的激活状态
+                const prevIndex = (currentMemberIndex - 1 + memberCards.length) % memberCards.length;
+                const prevCard = memberCards[prevIndex];
+                prevCard.classList.remove('auto-active');
+                prevCard.querySelector('.member-icon').classList.remove('animate-pulse-slow');
+                prevCard.querySelector('.member-name').classList.remove(prevCard.dataset.color);
+
+                // 2. 激活当前卡片
+                const currentCard = memberCards[currentMemberIndex];
+                currentCard.classList.add('auto-active');
+                currentCard.querySelector('.member-icon').classList.add('animate-pulse-slow');
+                // 读取 data-color 属性来设置对应的文字颜色
+                currentCard.querySelector('.member-name').classList.add(currentCard.dataset.color);
+
+                // 3. 准备下一次索引
+                currentMemberIndex = (currentMemberIndex + 1) % memberCards.length;
+            }
+
+
+            // --- 切换幻灯片主函数 (修改版) ---
+            function goToSlide(index) {
+                if (index < 0 || index >= totalSlides || isTransitioning) return;
+                isTransitioning = true;
+                
+                // 移除当前激活状态
+                slides[currentSlide].classList.remove('active');
+                
+                // 如果离开的是第1页，停止轮播
+                if (currentSlide === 0) {
+                    stopMemberCycle();
+                }
+
+                // 更新索引
+                currentSlide = index;
+                
+                // 添加新的激活状态
+                slides[currentSlide].classList.add('active');
+
+                // 如果进入的是第1页，启动轮播
+                if (currentSlide === 0) {
+                    startMemberCycle();
+                }
+
+                setTimeout(() => {
+                    isTransitioning = false;
+                }, 800);
+            }
+
+            function nextSlide() {
+                if (currentSlide < totalSlides - 1) goToSlide(currentSlide + 1);
+            }
+
+            function prevSlide() {
+                if (currentSlide > 0) goToSlide(currentSlide - 1);
+            }
+
+            // 初始化：如果当前是第1页，启动轮播
+            if (currentSlide === 0) {
+                startMemberCycle();
+            }
+
+            // --- 交互事件监听 ---
+            // 1. 键盘交互
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'Enter') nextSlide();
+                if (e.key === 'ArrowLeft') prevSlide();
+            });
+
+            // 2. 鼠标点击交互
+            document.addEventListener('click', (e) => {
+                const screenWidth = window.innerWidth;
+                const clickX = e.clientX;
+                if (clickX < screenWidth * 0.3) prevSlide();
+                else if (clickX > screenWidth * 0.7) nextSlide();
+            });
+
+            // 3. 移动端触摸滑动交互
+            let touchStartX = 0;
+            let touchEndX = 0;
+            document.addEventListener('touchstart', (e) => { touchStartX = e.changedTouches[0].screenX; }, {passive: true});
+            document.addEventListener('touchend', (e) => {
+                touchEndX = e.changedTouches[0].screenX;
+                handleSwipe();
+            }, {passive: true});
+            function handleSwipe() {
+                const threshold = 50;
+                if (touchEndX < touchStartX - threshold) nextSlide();
+                if (touchEndX > touchStartX + threshold) prevSlide();
+            }
+        });
+    </script>
+</body>
+</html>
