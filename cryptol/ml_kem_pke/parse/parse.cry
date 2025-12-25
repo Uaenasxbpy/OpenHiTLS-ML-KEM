@@ -1,74 +1,44 @@
 module Parse where
 
-// -----------------------------------------------------------------------------
-// 1. 常量定义
-// -----------------------------------------------------------------------------
-type q = 3329
-// type n = 256
-type Zq = Z q
+type q    = 3329
 type Byte = [8]
+type W12  = [12]
+type W16  = [16]
 
-// -----------------------------------------------------------------------------
-// 2. 核心位运算逻辑
-// -----------------------------------------------------------------------------
-BytesToUint12 : [3]Byte -> [2][12]
-BytesToUint12 [b0, b1, b2] = [d1, d2] where
-    d1 = (zext b0) + 256 * ((zext b1) % 16)
-    d2 = ((zext b1) / 16) + 16 * (zext b2)
+// 3 bytes -> 2x12-bit (与 C 同构)
+BytesToUint12 : [3]Byte -> [2]W12
+BytesToUint12 [b0, b1, b2] = [d1, d2]
+  where
+    [hi, lo] = (split b1) : [2][4]   // hi=b1[7..4], lo=b1[3..0]
+    d1 = (zext b0 : W12) + ((zext lo : W12) << 8)
+    d2 = (zext hi : W12) + ((zext b2 : W12) << 4)
 
-// -----------------------------------------------------------------------------
-// 3. 过滤逻辑 (递归内联修正版)
-// -----------------------------------------------------------------------------
-
-/**
- * 递归生成器。
- * 修正说明：将递归调用 rest 放入 if 分支内部拼接，确保所有分支返回类型均为 [inf]Zq。
- */
-GenerateStream : [inf]Byte -> [inf]Zq
-GenerateStream bytes = result
-    where
-        // 1. 取数据
-        chunk = take`{3} bytes
-        [raw1, raw2] = BytesToUint12 chunk
-
-        // 2. 转换类型
-        v1 = fromInteger (toInteger raw1) : Zq
-        v2 = fromInteger (toInteger raw2) : Zq
-        
-        // 3. 判断有效性
-        d1_ok = raw1 < `q
-        d2_ok = raw2 < `q
-
-        // 4. 准备下一轮递归 (Lazy Evaluation)
-        rest = GenerateStream (drop`{3} bytes)
-
-        // 5. 【关键修正】在分支内部进行拼接
-        // 此时每个分支的类型都是 [inf]Zq，类型检查通过
-        result = 
-            if d1_ok && d2_ok then [v1, v2] # rest
-            else if d1_ok     then [v1]     # rest
-            else if d2_ok     then [v2]     # rest
-            else                       rest
-
-// -----------------------------------------------------------------------------
-// 4. 主函数
-// -----------------------------------------------------------------------------
-
-/**
- * Parse 主函数
- * 输入: 有限长度的字节数组
- * 输出: 固定长度 n=256 的系数数组
- */
-Parse : {n, inLen} (fin n, fin inLen) => [inLen]Byte -> [n]Zq
-Parse input = take`{n} (GenerateStream infinite_input)
-    where
-        // 补零以构造无限输入流
-        infinite_input = input # zero
-
-// 判断 3 个字节是否能生成 2 个合法的系数（即不需要拒绝采样）
 IsHappyBlock : [3]Byte -> Bit
-IsHappyBlock bytes = d1_ok && d2_ok
-    where
-        [raw1, raw2] = BytesToUint12 bytes
-        d1_ok = raw1 < `q
-        d2_ok = raw2 < `q
+IsHappyBlock blk = (d1 < `q) && (d2 < `q)
+  where
+    [d1, d2] = BytesToUint12 blk
+
+BlockToW16 : [3]Byte -> [2]W16
+BlockToW16 blk = [ zext d1 : W16, zext d2 : W16 ]
+  where
+    [d1, d2] = BytesToUint12 blk
+
+// -------------------- n=16, arrayLen=24 (k=8 blocks) --------------------
+Blocks24 : [24]Byte -> [8][3]Byte
+Blocks24 bs = (split bs) : [8][3]Byte
+
+AllHappy24 : [24]Byte -> Bit
+AllHappy24 bs = and (map IsHappyBlock (Blocks24 bs))
+
+ParseHappyW16_16 : [24]Byte -> [16]W16
+ParseHappyW16_16 bs = join (map BlockToW16 (Blocks24 bs))
+
+// -------------------- n=32, arrayLen=48 (k=16 blocks) --------------------
+Blocks48 : [48]Byte -> [16][3]Byte
+Blocks48 bs = (split bs) : [16][3]Byte
+
+AllHappy48 : [48]Byte -> Bit
+AllHappy48 bs = and (map IsHappyBlock (Blocks48 bs))
+
+ParseHappyW16_32 : [48]Byte -> [32]W16
+ParseHappyW16_32 bs = join (map BlockToW16 (Blocks48 bs))

@@ -1,52 +1,40 @@
 enable_experimental;
 
-import "Parse.cry" as Model;
+import "parse.cry" as Model;
 mod <- llvm_load_module "Parse.bc";
 
-// 辅助函数
-let ptr_to_fresh_readonly name type = do {
-    x <- llvm_fresh_var name type;
-    p <- llvm_alloc_readonly type;
-    llvm_points_to p (llvm_term x);
-    return (p, x);
+let ptr_to_fresh_readonly name ty = do {
+  x <- llvm_fresh_var name ty;
+  p <- llvm_alloc_readonly ty;
+  llvm_points_to p (llvm_term x);
+  return (p, x);
 };
 
-let Parse_spec = do {
-    // ----------------------------------------------------------------
-    // 策略：Happy Path 验证 (n=2, len=3)
-    // ----------------------------------------------------------------
-    let n = 2;
-    let arrayLen = 3;
+let Parse_spec_happy_16 = do {
+  // input: 24 bytes
+  (arrayB_ptr, arrayB_val) <- ptr_to_fresh_readonly
+    "arrayB" (llvm_array 24 (llvm_int 8));
 
-    // 1. 输入: 3 个字节
-    (arrayB_ptr, arrayB_val) <- ptr_to_fresh_readonly "arrayB" (llvm_array 3 (llvm_int 8));
-    
-    // 【前置条件】: 强制假设这3个字节是完美的，不需要拒绝采样
-    llvm_precond {{ Model::IsHappyBlock arrayB_val }};
+  // happy-path precond
+  llvm_precond {{ Model::AllHappy24 arrayB_val }};
 
-    // 2. 输出: 2 个系数的空间
-    polyNtt_ptr <- llvm_alloc (llvm_array 2 (llvm_int 16));
+  // output: 16 uint16
+  polyNtt_ptr <- llvm_alloc (llvm_array 16 (llvm_int 16));
 
-    // 3. 执行 C 函数
-    // 【关键修正】：直接传入数字，防止读取到 Cryptol 里的 256
-    llvm_execute_func [
-        polyNtt_ptr, 
-        arrayB_ptr, 
-        llvm_term {{ 3 : [32] }},  // arrayLen = 3
-        llvm_term {{ 2 : [32] }}   // n = 2
-    ];
+  // call Parse(polyNtt, arrayB, arrayLen=24, n=16)
+  llvm_execute_func [
+    polyNtt_ptr,
+    arrayB_ptr,
+    llvm_term {{ 24 : [32] }},
+    llvm_term {{ 16 : [32] }}
+  ];
 
-    // 4. 返回值验证
-    llvm_return (llvm_term {{ 0 : [32] }});
+  llvm_return (llvm_term {{ 0 : [32] }});
 
-    // 5. 输出验证
-    // 同样，这里显式指定 Cryptol 模型计算 2 个系数
-    llvm_points_to polyNtt_ptr (llvm_term {{ 
-        [ fromInteger (fromZ c) : [16] 
-        | c <- Model::Parse`{n=2} arrayB_val 
-        ] 
-    }});
+  llvm_points_to polyNtt_ptr (llvm_term {{
+    Model::ParseHappyW16_16 arrayB_val
+  }});
 };
 
-print "开始验证 Parse 函数 (Happy Path, n=2)...";
-llvm_verify mod "Parse" [] false Parse_spec z3;
+print "Verifying Parse (happy path) n=16, arrayLen=24...";
+llvm_verify mod "Parse" [] true Parse_spec_happy_16 z3;

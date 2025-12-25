@@ -1,0 +1,163 @@
+// module GenMatrix where
+
+// // 1. 基础定义 (合并自 Parse 模块)
+
+// type n = 256
+// type q = 3329
+// type Zq = Z q
+// type Byte = [8]
+
+
+// // Parse 核心逻辑 (直接搬运过来，改名为 InternalParse 以免混淆)
+
+
+// // 字节转12位整数
+// BytesToUint12 : [3]Byte -> [2][12]
+// BytesToUint12 [b0, b1, b2] = [d1, d2] where
+//     d1 = (zext b0) + 256 * ((zext b1) % 16)
+//     d2 = ((zext b1) / 16) + 16 * (zext b2)
+
+// // 无限流生成器
+// GenerateStream : [inf]Byte -> [inf]Zq
+// GenerateStream bytes = result
+//     where
+//         chunk = take`{3} bytes
+//         [raw1, raw2] = BytesToUint12 chunk
+//         v1 = fromInteger (toInteger raw1) : Zq
+//         v2 = fromInteger (toInteger raw2) : Zq
+//         d1_ok = raw1 < `q
+//         d2_ok = raw2 < `q
+//         rest = GenerateStream (drop`{3} bytes)
+//         result = 
+//             if d1_ok && d2_ok then [v1, v2] # rest
+//             else if d1_ok     then [v1]     # rest
+//             else if d2_ok     then [v2]     # rest
+//             else                       rest
+
+// // Parse 主函数
+// InternalParse : {inLen} (fin inLen) => [inLen]Byte -> [n]Zq
+// InternalParse input = take`{n} (GenerateStream infinite_input)
+//     where
+//         infinite_input = input # zero
+
+// // 2. GenMatrix 定义
+
+// type K = 2          // Kyber-512 (k=2)
+// type SeedLen = 32
+// type XOF_Len = 1000 
+
+// // 抽象组件 (Mock Components)
+
+
+// /**
+//  * 抽象的 XOF 函数
+//  * 输入: 34 字节 (Seed || i || j)
+//  * 输出: 无限字节流
+//  */
+// AbstractHash : [SeedLen + 2][8] -> [inf][8]
+// AbstractHash input = [ x ^ 0xAA | x <- (input # zero) ] 
+
+// /**
+//  * 封装 Parse
+//  * 直接调用上面的 InternalParse，不再依赖外部模块
+//  */
+// SpecParse : [XOF_Len][8] -> [256]Zq
+// SpecParse input = InternalParse input
+//     // 注意：InternalParse 内部已经做了 infinite_input = input # zero
+//     // 所以这里直接传 input 即可
+
+
+// // GenMatrix 核心规格
+
+
+// /**
+//  * GenMatrix 规格
+//  * rho: 32字节种子
+//  * isEnc: True 生成 A^T, False 生成 A
+//  */
+// GenMatrix : [SeedLen][8] -> Bit -> [K][K][256]Zq
+// GenMatrix rho isEnc = matrix
+//     where
+//         // 使用列表推导生成 K x K 矩阵
+//         matrix = [ [ GeneratePoly i j 
+//                    | j <- [0 .. (K-1)] ] 
+//                  | i <- [0 .. (K-1)] ]
+
+//         GeneratePoly : [8] -> [8] -> [256]Zq
+//         GeneratePoly i j = poly
+//             where
+//                 // 1. 构造输入种子 (rho || idx1 || idx2)
+//                 idx1 = if isEnc then i else j
+//                 idx2 = if isEnc then j else i
+                
+//                 hash_input = rho # [idx1, idx2]
+                
+//                 // 2. 生成哈希流 (取前 1000 字节)
+//                 stream_bytes = take`{XOF_Len} (AbstractHash hash_input)
+                
+//                 // 3. 解析为多项式
+//                 poly = SpecParse stream_bytes
+
+module GenMatrix where
+
+type Byte = [8]
+type W16  = [16]
+
+type N       = 256
+type K       = 2
+type SeedLen = 32
+type XOF_Len = 1000
+
+// 3 bytes -> two 12-bit values (stored in W16)
+BytesToUint12 : [3]Byte -> [2]W16
+BytesToUint12 [b0, b1, b2] = [d1, d2]
+  where
+    lo : Byte
+    lo = b1 && (0x0f : Byte)
+
+    hi : Byte
+    hi = b1 >> 4
+
+    d1 : W16
+    d1 = (zext b0 : W16) + ((zext lo : W16) << 8)
+
+    d2 : W16
+    d2 = (zext hi : W16) + ((zext b2 : W16) << 4)
+
+// happy parse: 384 bytes -> 256 outputs (no rejection)
+ParseHappy : [384]Byte -> [N]W16
+ParseHappy in384 = join [ BytesToUint12 blk | blk <- blocks ]
+  where
+    blocks : [128][3]Byte
+    blocks = split in384
+
+// abstract XOF output: all-zero 1000 bytes
+AbstractHashOut : [SeedLen + 2]Byte -> [XOF_Len]Byte
+AbstractHashOut _ = zero
+
+// toy GenMatrix spec for k=2
+GenMatrixToy : [SeedLen]Byte -> Bit -> [K][K][N]W16
+GenMatrixToy rho isEnc =
+  [ [ genPoly i j | j <- idxs ]
+  | i <- idxs
+  ]
+  where
+    idxs : [K]Byte
+    idxs = [0, 1]
+
+    genPoly : Byte -> Byte -> [N]W16
+    genPoly i j = ParseHappy (take`{384} xofOut)
+      where
+        idx1 : Byte
+        idx1 = if isEnc then i else j
+
+        idx2 : Byte
+        idx2 = if isEnc then j else i
+
+        hash_input : [SeedLen + 2]Byte
+        hash_input = rho # [idx1, idx2]
+
+        xofOut : [XOF_Len]Byte
+        xofOut = AbstractHashOut hash_input
+
+

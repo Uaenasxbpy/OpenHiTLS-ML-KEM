@@ -1,0 +1,47 @@
+enable_experimental;
+
+import "Parse_1.cry" as Model;
+
+mod <- llvm_load_module "Parse.bc";
+
+// Allocate a readonly array, bind it to a fresh symbolic value
+let ptr_to_fresh_readonly name ty = do {
+  x <- llvm_fresh_var name ty;
+  p <- llvm_alloc_readonly ty;
+  llvm_points_to p (llvm_term x);
+  return (p, x);
+};
+
+let Parse_spec_n256 = do {
+  let n        = 256;
+  let arrayLen = 384;   // 128 blocks * 3 bytes
+
+  // Input: 384 bytes
+  (arrayB_ptr, arrayB_val) <- ptr_to_fresh_readonly
+      "arrayB" (llvm_array 384 (llvm_int 8));
+
+  // Happy-path assumption: every 3-byte block yields 2 accepted coeffs
+  llvm_precond {{ Model::AllHappy384 arrayB_val }};
+
+  // Output buffer: 256 uint16
+  polyNtt_ptr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+
+  // Execute Parse(polyNtt, arrayB, arrayLen, n)
+  llvm_execute_func [
+      polyNtt_ptr,
+      arrayB_ptr,
+      llvm_term {{ 384 : [32] }},
+      llvm_term {{ 256 : [32] }}
+  ];
+
+  // Return value: CRYPT_SUCCESS (0)
+  llvm_return (llvm_term {{ 0 : [32] }});
+
+  // Postcondition: output matches the happy-path model
+  llvm_points_to polyNtt_ptr (llvm_term {{
+      Model::ParseHappyW16_256 arrayB_val
+  }});
+};
+
+print "Verifying Parse with n=256, arrayLen=384...";
+llvm_verify mod "Parse" [] true Parse_spec_n256 yices;

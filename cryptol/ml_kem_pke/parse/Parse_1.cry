@@ -1,0 +1,43 @@
+module Parse where
+
+type Q = 3329
+type Byte = [8]
+
+// -----------------------------------------------------------------------------
+// 12-bit unpacking (SMT-friendly: mask/shift instead of udiv/urem)
+// C:
+//   d1 = b0 + ((b1 & 0x0f) << 8)
+//   d2 = (b1 >> 4) + (b2 << 4)
+// -----------------------------------------------------------------------------
+BytesToUint12 : [3]Byte -> [2][12]
+BytesToUint12 [b0, b1, b2] = [d1, d2]
+  where
+    lo4 = b1 && 0x0f
+    hi4 = b1 >> 4
+
+    d1  = (zext b0) + ((zext lo4) << 8)
+    d2  = (zext hi4) + ((zext b2)  << 4)
+
+// Happy-block predicate (no rejection)
+IsHappyBlock : [3]Byte -> Bit
+IsHappyBlock blk = (d1 < `Q) && (d2 < `Q)
+  where
+    [d1, d2] = BytesToUint12 blk
+
+// IMPORTANT: split`{128} means "split into 128 chunks" (each chunk is 3 bytes)
+// because 384 = 128 * 3
+Blocks384 : [384]Byte -> [128][3]Byte
+Blocks384 xs = split`{128} xs
+
+AllHappy384 : [384]Byte -> Bit
+AllHappy384 xs = and [ IsHappyBlock blk | blk <- Blocks384 xs ]
+
+// one block -> two 16-bit outputs
+BlockToW16 : [3]Byte -> [2][16]
+BlockToW16 blk = [ zext d1 : [16], zext d2 : [16] ]
+  where
+    [d1, d2] = BytesToUint12 blk
+
+// Happy-path parse model for n=256, arrayLen=384
+ParseHappyW16_256 : [384]Byte -> [256][16]
+ParseHappyW16_256 xs = join (map BlockToW16 (Blocks384 xs))
