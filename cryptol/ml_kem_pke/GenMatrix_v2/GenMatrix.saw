@@ -1,0 +1,99 @@
+enable_experimental;
+
+import "GenMatrix.cry" as Model;
+mod <- llvm_load_module "GenMatrix.bc";
+
+// ------------------ Override: HashFuncXOF ------------------
+let HashFuncXOF_spec = do {
+    // 忽略 libCtx
+    llvm_fresh_pointer (llvm_int 8); 
+    
+    (in_ptr, in_val) <- do {
+        x <- llvm_fresh_var "in" (llvm_array 34 (llvm_int 8));
+        p <- llvm_alloc_readonly (llvm_array 34 (llvm_int 8));
+        llvm_points_to p (llvm_term x);
+        return (p, x);
+    };
+
+    out_arr <- llvm_alloc (llvm_array 1000 (llvm_int 8));
+
+    llvm_execute_func [
+        llvm_null, // libCtx
+        in_ptr,
+        llvm_term {{ 34 : [32] }},
+        out_arr,
+        llvm_term {{ 1000 : [32] }}
+    ];
+
+    llvm_points_to out_arr (llvm_term {{ Model::AbstractHashOut in_val }});
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// ------------------ Override: Parse ------------------
+let Parse_spec = do {
+    poly_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    
+    array_arr <- llvm_alloc (llvm_array 1000 (llvm_int 8));
+    array_val <- llvm_fresh_var "arrayB" (llvm_array 1000 (llvm_int 8));
+    llvm_points_to array_arr (llvm_term array_val);
+
+    llvm_execute_func [
+        poly_arr,
+        array_arr,
+        llvm_term {{ 1000 : [32] }},
+        llvm_term {{ 256  : [32] }}
+    ];
+
+    // Side effect: poly_arr gets parsed data
+    llvm_points_to poly_arr (llvm_term {{ Model::ParseHappy array_val }});
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// ------------------ GenMatrix Core Spec ------------------
+let GenMatrix_Core_spec = do {
+    let k = 2;
+    let n = 256;
+    let total_len = 1024; // k * k * n = 2 * 2 * 256 = 1024
+    
+    // 1. Inputs
+    (rho_ptr, rho_val) <- do {
+        x <- llvm_fresh_var "rho" (llvm_array 32 (llvm_int 8));
+        p <- llvm_alloc_readonly (llvm_array 32 (llvm_int 8));
+        llvm_points_to p (llvm_term x);
+        return (p, x);
+    };
+
+    isEnc_val <- llvm_fresh_var "isEnc" (llvm_int 8);
+
+    // 2. Output (Flattened Array)
+    // 这是一个巨大的连续内存，没有任何指针结构
+    output_ptr <- llvm_alloc (llvm_array total_len (llvm_int 16));
+
+    // 3. Execute
+    // void GenMatrix_Core(uint8_t k, const uint8_t *rho, uint8_t isEnc, uint16_t *output_flat)
+    llvm_execute_func [
+        llvm_term {{ `k : [8] }},
+        rho_ptr,
+        llvm_term isEnc_val,
+        output_ptr
+    ];
+
+    // 4. Verify
+    llvm_return (llvm_term {{ 0 : [32] }});
+
+    // 比较拍扁后的结果
+    // 注意: isEnc_val != 0 是将 C 的 i8 转为 Cryptol 的 Bit
+    let expected = {{ Model::GenMatrix_Flat rho_val (isEnc_val != 0) }};
+    
+    // 验证整个大数组
+    // 数据类型已经匹配，直接写入
+    llvm_points_to output_ptr (llvm_term expected);
+};
+
+// ------------------ Run ------------------
+print "Registering overrides...";
+hash_ov <- llvm_unsafe_assume_spec mod "HashFuncXOF" HashFuncXOF_spec;
+parse_ov <- llvm_unsafe_assume_spec mod "Parse"       Parse_spec;
+
+print "Verifying GenMatrix Core Logic...";
+llvm_verify mod "GenMatrix_Core" [hash_ov, parse_ov] false GenMatrix_Core_spec z3;

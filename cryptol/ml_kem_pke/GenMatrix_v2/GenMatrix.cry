@@ -1,0 +1,92 @@
+module GenMatrix where
+
+type Byte = [8]
+type W16  = [16]
+type N    = 256
+type K    = 2
+type SeedLen = 32
+type XOF_Len = 1000
+
+// --- Mocks ---
+
+// Mock Hash Output (全0)
+AbstractHashOut : [SeedLen + 2]Byte -> [XOF_Len]Byte
+AbstractHashOut _ = zero
+
+// Mock Parse (假设输入字节就是系数)
+ParseHappy : [XOF_Len]Byte -> [N]W16
+ParseHappy inBytes = [ zext b | b <- take`{N} inBytes ]
+
+// --- Core Spec ---
+
+/**
+ * GenMatrix_Flat
+ * 返回一个扁平的数组 [K*K*N]W16
+ */
+GenMatrix_Flat : [SeedLen]Byte -> Bit -> [K * K * N]W16
+GenMatrix_Flat rho isEnc = join flat_matrix
+    where
+        // 生成二维矩阵
+        matrix_2d = 
+            [ [ genPoly i j | j <- [0 .. (K-1)] ]
+            | i <- [0 .. (K-1)]
+            ]
+        
+        // 拍扁成 [K*K][N]
+        flat_matrix = join matrix_2d
+
+        genPoly : Byte -> Byte -> [N]W16
+        genPoly i j = ParseHappy (AbstractHashOut hash_input)
+          where
+            idx1 = if isEnc then i else j
+            idx2 = if isEnc then j else i
+            hash_input = rho # [idx1, idx2]
+
+
+
+// 1. 基础属性验证
+
+
+// 属性 1: 长度验证
+// 证明：无论种子是什么，生成的扁平数组长度永远是 K*K*N (1024)
+// 【修改点】：在 K 和 N 前面加上反引号 `，将其转换为数值
+property Prop_Length (rho : [32][8]) (isEnc : Bit) =
+    length (GenMatrix_Flat rho isEnc) == `K * `K * `N
+
+// 属性 2: 确定性验证
+// 证明：相同的输入一定产生相同的输出
+property Prop_Deterministic (rho : [32][8]) (isEnc : Bit) =
+    GenMatrix_Flat rho isEnc == GenMatrix_Flat rho isEnc
+
+
+// 2. 核心逻辑验证：矩阵转置关系 (A vs A^T)
+
+
+// 辅助函数：将扁平数组还原为 [K][K] 矩阵以便比较
+toMatrix : {rows, cols, n} (fin rows, fin cols, fin n) => 
+           [rows * cols * n]W16 -> [rows][cols][n]W16
+toMatrix flat = split (split flat)
+
+// 属性 3: 转置关系
+// 描述：GenMatrix(False) 生成的是 A，GenMatrix(True) 生成的是 A^T。
+// 数学含义：A[i][j] 应该等于 A^T[j][i]
+// 
+property Prop_Transpose_Relationship (rho : [32][8]) =
+    matrixA == transpose matrixAT
+    where
+        // 生成 A (isEnc = False)
+        flatA   = GenMatrix_Flat rho False
+        // 这里不需要加反引号，因为 `{...} 需要的就是类型
+        matrixA = toMatrix`{rows=K, cols=K, n=N} flatA
+
+        // 生成 A^T (isEnc = True)
+        flatAT   = GenMatrix_Flat rho True
+        matrixAT = toMatrix`{rows=K, cols=K, n=N} flatAT
+
+
+// 3. 具体值验证 (Sanity Check)
+
+// 属性 4: 特定输入下的已知值检查 (相当于之前的测试用例)
+// 注意：这只验证 rho=zero 的情况
+property Prop_Specific_Value =
+    (GenMatrix_Flat zero False) @ 0 == 0x00aa

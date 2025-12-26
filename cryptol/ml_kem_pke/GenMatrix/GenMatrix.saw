@@ -124,174 +124,168 @@
 
 
 enable_experimental;
-enable_deprecated;
 
 import "GenMatrix.cry" as Model;
 mod <- llvm_load_module "GenMatrix.bc";
 
 // ------------------ helpers ------------------
 let ptr_to_fresh_readonly name ty = do {
-  x <- llvm_fresh_var name ty;
-  p <- llvm_alloc_readonly ty;
-  llvm_points_to p (llvm_term x);
-  return (p, x);
+    x <- llvm_fresh_var name ty;
+    p <- llvm_alloc_readonly ty;
+    llvm_points_to p (llvm_term x);
+    return (p, x);
 };
 
 // ------------------ Override: HashFuncXOF ------------------
-// int32_t HashFuncXOF(void *libCtx, const uint8_t *in, uint32_t inLen,
-//                     uint8_t *out, uint32_t outLen)
 let HashFuncXOF_spec = do {
-  libCtx <- llvm_fresh_pointer (llvm_int 8);
+    libCtx <- llvm_fresh_pointer (llvm_int 8);
 
-  (in_ptr, in_val) <- ptr_to_fresh_readonly "in" (llvm_array 34 (llvm_int 8));
+    (in_ptr, in_val) <- ptr_to_fresh_readonly "in" (llvm_array 34 (llvm_int 8));
 
-  out_arr <- llvm_alloc (llvm_array 1000 (llvm_int 8));
-  let out_ptr = llvm_cast_pointer out_arr (llvm_pointer (llvm_int 8)); // ✅ 用 let
+    // ✅ 修复 1: 直接使用 out_arr，不要 cast
+    out_arr <- llvm_alloc (llvm_array 1000 (llvm_int 8));
+    
+    llvm_execute_func [
+        libCtx,
+        in_ptr,
+        llvm_term {{ 34 : [32] }},
+        out_arr, // 直接传这个
+        llvm_term {{ 1000 : [32] }}
+    ];
 
-  llvm_execute_func [
-    libCtx,
-    in_ptr,
-    llvm_term {{ 34 : [32] }},
-    out_ptr,
-    llvm_term {{ 1000 : [32] }}
-  ];
-
-  llvm_points_to out_arr (llvm_term {{ Model::AbstractHashOut in_val }});
-  llvm_return (llvm_term {{ 0 : [32] }});
+    llvm_points_to out_arr (llvm_term {{ Model::AbstractHashOut in_val }});
+    llvm_return (llvm_term {{ 0 : [32] }});
 };
 
 // ------------------ Override: Parse ------------------
-// int32_t Parse(uint16_t *polyNtt, uint8_t *arrayB, uint32_t arrayLen, uint32_t n)
 let Parse_spec = do {
-  poly_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  let poly_ptr = llvm_cast_pointer poly_arr (llvm_pointer (llvm_int 16)); // ✅ 用 let
+    // ✅ 修复 2: 直接使用 poly_arr，不要 cast
+    poly_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    
+    // ✅ 修复 3: 直接使用 array_arr，不要 cast
+    array_arr <- llvm_alloc (llvm_array 1000 (llvm_int 8));
+    array_val <- llvm_fresh_var "arrayB" (llvm_array 1000 (llvm_int 8));
+    llvm_points_to array_arr (llvm_term array_val);
 
-  // 输入 arrayB（我们用符号数组描述其内容）
-  array_arr <- llvm_alloc (llvm_array 1000 (llvm_int 8));
-  let array_ptr = llvm_cast_pointer array_arr (llvm_pointer (llvm_int 8)); // ✅ 用 let
-  array_val <- llvm_fresh_var "arrayB" (llvm_array 1000 (llvm_int 8));
-  llvm_points_to array_arr (llvm_term array_val);
+    llvm_execute_func [
+        poly_arr, // 直接传
+        array_arr, // 直接传
+        llvm_term {{ 1000 : [32] }},
+        llvm_term {{ 256  : [32] }}
+    ];
 
-  llvm_execute_func [
-    poly_ptr,
-    array_ptr,
-    llvm_term {{ 1000 : [32] }},
-    llvm_term {{ 256  : [32] }}
-  ];
+    // 保持输入不变
+    llvm_points_to array_arr (llvm_term array_val);
 
-  // 保持输入内存仍然是 array_val（防止 override 里丢失内存描述）
-  llvm_points_to array_arr (llvm_term array_val);
+    // 输出契约
+    llvm_points_to poly_arr (llvm_term {{ Model::ParseHappy (take`{384} array_val) }});
 
-  // 输出等于 ParseHappy(take 384 bytes)
-  llvm_points_to poly_arr (llvm_term {{ Model::ParseHappy (take`{384} array_val) }});
-
-  llvm_return (llvm_term {{ 0 : [32] }});
+    llvm_return (llvm_term {{ 0 : [32] }});
 };
 
 // ------------------ GenMatrix spec: isEnc = False ------------------
 let GenMatrix_spec_false = do {
-  // ctx->info->k = 2, ctx->libCtx = null
-  info_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Info");
-  llvm_points_to info_ptr (llvm_struct_value [ llvm_term {{ 2 : [8] }} ]);
+    // 构造 Context
+    info_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Info");
+    llvm_points_to info_ptr (llvm_struct_value [ llvm_term {{ 2 : [8] }} ]);
 
-  ctx_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Ctx");
-  llvm_points_to ctx_ptr (llvm_struct_value [ info_ptr, llvm_null ]);
+    ctx_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Ctx");
+    llvm_points_to ctx_ptr (llvm_struct_value [ info_ptr, llvm_null ]);
 
-  // digest
-  (digest_ptr, digest_val) <- ptr_to_fresh_readonly "digest" (llvm_array 32 (llvm_int 8));
+    // Digest
+    (digest_ptr, digest_val) <- ptr_to_fresh_readonly "digest" (llvm_array 32 (llvm_int 8));
 
-  // 4 个输出 buffer
-  buf00_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  buf01_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  buf10_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  buf11_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    // 4 个输出 buffer
+    buf00_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf01_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf10_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf11_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
 
-  let p_i16 = llvm_pointer (llvm_int 16);
-  let buf00_ptr = llvm_cast_pointer buf00_arr p_i16;
-  let buf01_ptr = llvm_cast_pointer buf01_arr p_i16;
-  let buf10_ptr = llvm_cast_pointer buf10_arr p_i16;
-  let buf11_ptr = llvm_cast_pointer buf11_arr p_i16;
+    // ✅ 修复 4: 构造指针数组时，也尽量减少 cast，不过这里为了放入 array_value 可能需要 cast
+    // 如果下面 matrix_arr 定义的是 pointer(i16)，那 buffer 应该是 pointer(i16)
+    // 这里的 cast 是为了匹配 matrix_arr 的元素类型，通常是安全的
+    let p_i16 = llvm_pointer (llvm_int 16);
+    let buf00_ptr = llvm_cast_pointer buf00_arr p_i16;
+    let buf01_ptr = llvm_cast_pointer buf01_arr p_i16;
+    let buf10_ptr = llvm_cast_pointer buf10_arr p_i16;
+    let buf11_ptr = llvm_cast_pointer buf11_arr p_i16;
 
-  // polyMatrix: [4][4] of i16*
-  let nullp = llvm_null;
-  let row0 = llvm_array_value [ buf00_ptr, buf01_ptr, nullp, nullp ];
-  let row1 = llvm_array_value [ buf10_ptr, buf11_ptr, nullp, nullp ];
-  let row2 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
-  let row3 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
+    let nullp = llvm_null;
+    let row0 = llvm_array_value [ buf00_ptr, buf01_ptr, nullp, nullp ];
+    let row1 = llvm_array_value [ buf10_ptr, buf11_ptr, nullp, nullp ];
+    let row2 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
+    let row3 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
 
-  matrix_arr <- llvm_alloc (llvm_array 4 (llvm_array 4 (llvm_pointer (llvm_int 16))));
-  llvm_points_to matrix_arr (llvm_array_value [ row0, row1, row2, row3 ]);
+    matrix_arr <- llvm_alloc (llvm_array 4 (llvm_array 4 (llvm_pointer (llvm_int 16))));
+    llvm_points_to matrix_arr (llvm_array_value [ row0, row1, row2, row3 ]);
 
-  let matrix_arg = llvm_cast_pointer matrix_arr
-    (llvm_pointer (llvm_array 4 (llvm_pointer (llvm_int 16))));
+    // ✅ 修复 5: matrix_arg 不需要 cast，直接传 array 指针即可
+    // LLVM 会自动处理 [4 x [4 x i16*]]* -> i16*** 的匹配
+    
+    // ✅ 修复 6: isEnc 类型改为 [8] (兼容 C bool)
+    llvm_execute_func [
+        ctx_ptr,
+        digest_ptr,
+        matrix_arr, // 直接传
+        llvm_term {{ 0 : [8] }} 
+    ];
 
-  // isEnc = false (i1)
-  llvm_execute_func [
-    ctx_ptr,
-    digest_ptr,
-    matrix_arg,
-    llvm_term {{ 0 : [1] }}
-  ];
+    llvm_return (llvm_term {{ 0 : [32] }});
 
-  llvm_return (llvm_term {{ 0 : [32] }});
+    let expected = {{ Model::GenMatrixToy digest_val False }};
 
-  let expected = {{ Model::GenMatrixToy digest_val False }};
-
-  llvm_points_to buf00_arr (llvm_term {{ expected @ 0 @ 0 }});
-  llvm_points_to buf01_arr (llvm_term {{ expected @ 0 @ 1 }});
-  llvm_points_to buf10_arr (llvm_term {{ expected @ 1 @ 0 }});
-  llvm_points_to buf11_arr (llvm_term {{ expected @ 1 @ 1 }});
+    llvm_points_to buf00_arr (llvm_term {{ expected @ 0 @ 0 }});
+    llvm_points_to buf01_arr (llvm_term {{ expected @ 0 @ 1 }});
+    llvm_points_to buf10_arr (llvm_term {{ expected @ 1 @ 0 }});
+    llvm_points_to buf11_arr (llvm_term {{ expected @ 1 @ 1 }});
 };
 
 // ------------------ GenMatrix spec: isEnc = True ------------------
 let GenMatrix_spec_true = do {
-  info_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Info");
-  llvm_points_to info_ptr (llvm_struct_value [ llvm_term {{ 2 : [8] }} ]);
+    info_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Info");
+    llvm_points_to info_ptr (llvm_struct_value [ llvm_term {{ 2 : [8] }} ]);
 
-  ctx_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Ctx");
-  llvm_points_to ctx_ptr (llvm_struct_value [ info_ptr, llvm_null ]);
+    ctx_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Ctx");
+    llvm_points_to ctx_ptr (llvm_struct_value [ info_ptr, llvm_null ]);
 
-  (digest_ptr, digest_val) <- ptr_to_fresh_readonly "digest" (llvm_array 32 (llvm_int 8));
+    (digest_ptr, digest_val) <- ptr_to_fresh_readonly "digest" (llvm_array 32 (llvm_int 8));
 
-  buf00_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  buf01_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  buf10_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
-  buf11_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf00_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf01_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf10_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
+    buf11_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
 
-  let p_i16 = llvm_pointer (llvm_int 16);
-  let buf00_ptr = llvm_cast_pointer buf00_arr p_i16;
-  let buf01_ptr = llvm_cast_pointer buf01_arr p_i16;
-  let buf10_ptr = llvm_cast_pointer buf10_arr p_i16;
-  let buf11_ptr = llvm_cast_pointer buf11_arr p_i16;
+    let p_i16 = llvm_pointer (llvm_int 16);
+    let buf00_ptr = llvm_cast_pointer buf00_arr p_i16;
+    let buf01_ptr = llvm_cast_pointer buf01_arr p_i16;
+    let buf10_ptr = llvm_cast_pointer buf10_arr p_i16;
+    let buf11_ptr = llvm_cast_pointer buf11_arr p_i16;
 
-  let nullp = llvm_null;
-  let row0 = llvm_array_value [ buf00_ptr, buf01_ptr, nullp, nullp ];
-  let row1 = llvm_array_value [ buf10_ptr, buf11_ptr, nullp, nullp ];
-  let row2 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
-  let row3 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
+    let nullp = llvm_null;
+    let row0 = llvm_array_value [ buf00_ptr, buf01_ptr, nullp, nullp ];
+    let row1 = llvm_array_value [ buf10_ptr, buf11_ptr, nullp, nullp ];
+    let row2 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
+    let row3 = llvm_array_value [ nullp,    nullp,    nullp, nullp ];
 
-  matrix_arr <- llvm_alloc (llvm_array 4 (llvm_array 4 (llvm_pointer (llvm_int 16))));
-  llvm_points_to matrix_arr (llvm_array_value [ row0, row1, row2, row3 ]);
+    matrix_arr <- llvm_alloc (llvm_array 4 (llvm_array 4 (llvm_pointer (llvm_int 16))));
+    llvm_points_to matrix_arr (llvm_array_value [ row0, row1, row2, row3 ]);
 
-  let matrix_arg = llvm_cast_pointer matrix_arr
-    (llvm_pointer (llvm_array 4 (llvm_pointer (llvm_int 16))));
+    // ✅ 修复 7: isEnc = 1 (8-bit)
+    llvm_execute_func [
+        ctx_ptr,
+        digest_ptr,
+        matrix_arr, 
+        llvm_term {{ 1 : [8] }}
+    ];
 
-  // isEnc = true (i1)
-  llvm_execute_func [
-    ctx_ptr,
-    digest_ptr,
-    matrix_arg,
-    llvm_term {{ 1 : [1] }}
-  ];
+    llvm_return (llvm_term {{ 0 : [32] }});
 
-  llvm_return (llvm_term {{ 0 : [32] }});
+    let expected = {{ Model::GenMatrixToy digest_val True }};
 
-  let expected = {{ Model::GenMatrixToy digest_val True }};
-
-  llvm_points_to buf00_arr (llvm_term {{ expected @ 0 @ 0 }});
-  llvm_points_to buf01_arr (llvm_term {{ expected @ 0 @ 1 }});
-  llvm_points_to buf10_arr (llvm_term {{ expected @ 1 @ 0 }});
-  llvm_points_to buf11_arr (llvm_term {{ expected @ 1 @ 1 }});
+    llvm_points_to buf00_arr (llvm_term {{ expected @ 0 @ 0 }});
+    llvm_points_to buf01_arr (llvm_term {{ expected @ 0 @ 1 }});
+    llvm_points_to buf10_arr (llvm_term {{ expected @ 1 @ 0 }});
+    llvm_points_to buf11_arr (llvm_term {{ expected @ 1 @ 1 }});
 };
 
 // ------------------ Run ------------------
