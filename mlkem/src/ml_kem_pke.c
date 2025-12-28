@@ -435,6 +435,19 @@ static void ByteDecode(int16_t *polyF, const uint8_t *a, uint8_t bit)
     }
 }
 
+/**
+ * @brief: Generate matrix A or A transpose.
+ * @param[in] ctx: MLKEM context.
+ * @param[in] digest: The seed used to generate matrix A or A transpose.
+ * @param[out] polyMatrix: The generated matrix A or A transpose.
+ * @param[in] isEnc: true: generate matrix A; false: generate matrix A transpose.
+ * @return: CRYPT_SUCCESS on success, others on failure.
+ * HashFuncXOF is used to generate each polynomial in the matrix.
+ * According to NIST.FIPS.203, when generating matrix A transpose,
+ * the row index and column index are swapped compared to generating matrix A.  
+ * Parse is used to parse the output of HashFuncXOF into a polynomial.
+ * Each polynomial has n coefficients.
+ */
 static int32_t GenMatrix(const CRYPT_ML_KEM_Ctx *ctx, const uint8_t *digest,
     int16_t *polyMatrix[MLKEM_K_MAX][MLKEM_K_MAX], bool isEnc)
 {
@@ -445,6 +458,7 @@ static int32_t GenMatrix(const CRYPT_ML_KEM_Ctx *ctx, const uint8_t *digest,
     (void)memcpy_s(p, MLKEM_SEED_LEN, digest, MLKEM_SEED_LEN);
     for (uint8_t i = 0; i < k; i++) {
         for (uint8_t j = 0; j < k; j++) {
+            // 生成矩阵A时，p的最后两字节依次为i和j；生成矩阵A转置时，p的最后两字节依次为j和i.
             if (isEnc) {
                 p[MLKEM_SEED_LEN] = i;
                 p[MLKEM_SEED_LEN + 1] = j;
@@ -452,8 +466,10 @@ static int32_t GenMatrix(const CRYPT_ML_KEM_Ctx *ctx, const uint8_t *digest,
                 p[MLKEM_SEED_LEN] = j;
                 p[MLKEM_SEED_LEN + 1] = i;
             }
+            // 根据p，派生伪随机字节流xofOut.
             int32_t ret = HashFuncXOF(ctx->libCtx, p, MLKEM_SEED_LEN + 2, xofOut, MLKEM_XOF_OUTPUT_LENGTH);
             RETURN_RET_IF(ret != CRYPT_SUCCESS, ret);
+            // 解析xofOut（拒绝采样），得到多项式polyMatrix[i][j].
             ret = Parse((uint16_t *)polyMatrix[i][j], xofOut, MLKEM_XOF_OUTPUT_LENGTH, MLKEM_N);
             RETURN_RET_IF(ret != CRYPT_SUCCESS, ret);
         }
