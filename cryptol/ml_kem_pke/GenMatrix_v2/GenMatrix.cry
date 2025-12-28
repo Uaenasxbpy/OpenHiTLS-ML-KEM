@@ -49,7 +49,6 @@ GenMatrix_Flat rho isEnc = join flat_matrix
 
 // 属性 1: 长度验证
 // 证明：无论种子是什么，生成的扁平数组长度永远是 K*K*N (1024)
-// 【修改点】：在 K 和 N 前面加上反引号 `，将其转换为数值
 property Prop_Length (rho : [32][8]) (isEnc : Bit) =
     length (GenMatrix_Flat rho isEnc) == `K * `K * `N
 
@@ -60,8 +59,6 @@ property Prop_Deterministic (rho : [32][8]) (isEnc : Bit) =
 
 
 // 2. 核心逻辑验证：矩阵转置关系 (A vs A^T)
-
-
 // 辅助函数：将扁平数组还原为 [K][K] 矩阵以便比较
 toMatrix : {rows, cols, n} (fin rows, fin cols, fin n) => 
            [rows * cols * n]W16 -> [rows][cols][n]W16
@@ -70,7 +67,6 @@ toMatrix flat = split (split flat)
 // 属性 3: 转置关系
 // 描述：GenMatrix(False) 生成的是 A，GenMatrix(True) 生成的是 A^T。
 // 数学含义：A[i][j] 应该等于 A^T[j][i]
-// 
 property Prop_Transpose_Relationship (rho : [32][8]) =
     matrixA == transpose matrixAT
     where
@@ -85,8 +81,6 @@ property Prop_Transpose_Relationship (rho : [32][8]) =
 
 
 // 3. 具体值验证 (Sanity Check)
-
-// 属性 4: 特定输入下的已知值检查 (相当于之前的测试用例)
 // 注意：这只验证 rho=zero 的情况
 property Prop_Specific_Value =
     (GenMatrix_Flat zero False) @ 0 == 0x00aa

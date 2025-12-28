@@ -1,0 +1,151 @@
+module PkeKeyGen where
+
+// ==========================================
+// 1. 基础参数与类型定义
+// ==========================================
+
+type n = 256
+type q = 3329
+type k = 3      // ML-KEM-768
+type eta_1 = 2  // ML-KEM-768
+
+type Rq = [n](Z q)
+type Tq = [n](Z q)
+type Byte = [8]
+
+// ==========================================
+// 2. 核心函数 (修复版)
+// ==========================================
+
+// 模拟 XOF (SHAKE128) - 仅作占位符以便编译通过
+XOF : [34]Byte -> [inf]Byte
+XOF seed = zero 
+
+// 模拟 PRF (SHAKE256) - 仅作占位符
+PRF : {eta} (fin eta) => [32]Byte -> [8] -> [64 * eta]Byte
+PRF seed nonce = zero 
+
+// [修复] SampleNTT
+SampleNTT : [34]Byte -> Tq
+SampleNTT seed = a_hat' where
+    stream = XOF seed
+    
+    filter : [inf]Byte -> [inf](Z q)
+    filter s = coeffs where
+         (b0 # b1 # b2 # rest) = s
+         d1 = (zext b0) + 256 * ((zext b1) % 16)
+         d2 = ((zext b1) / 16) + 16 * (zext b2)
+         
+         // Fix 3: 加上括号解决优先级问题
+         coeffs = 
+             if (d1 < `q) && (d2 < `q) then [fromInteger d1, fromInteger d2] # filter rest
+             else if (d1 < `q)         then [fromInteger d1] # filter rest
+             else if (d2 < `q)         then [fromInteger d2] # filter rest
+             else filter rest
+
+    a_hat' = take`{256} (filter stream)
+
+// [修复] SamplePolyCBD
+SamplePolyCBD : {eta} (fin eta) => [64 * eta]Byte -> Rq
+SamplePolyCBD bytes = f where
+    // 1. 转换比特流
+    bits = join [ reverse (split`{8} b) | b <- bytes ] : [512 * eta]Bit
+
+    // 2. 主列表推导式
+    f = [ compute_coeff i | i <- [0 .. 255] ]
+
+    // 3. 辅助函数
+    compute_coeff i = (sum x) - (sum y) where
+         start = i * 2 * `eta
+         
+         // 修复核心：将上限定义为一个明确的变量
+         // Cryptol 就能正确推导它的数值类型了
+         limit = `eta - 1
+         
+         x = [ if bits @ (start + j) then 1 else 0          
+             | j <- [0 .. limit] ]
+             
+         y = [ if bits @ (start + `eta + j) then 1 else 0   
+             | j <- [0 .. limit] ]
+
+// ==========================================
+// 4. 辅助数学运算 (NTT 与 矩阵乘法)
+// ==========================================
+
+// NTT 变换 (抽象接口)
+NTT_Vec : [k]Rq -> [k]Tq
+NTT_Vec v = v // 省略具体 NTT 蝶形运算实现
+
+// 矩阵向量乘法 (点乘)
+// 计算 A * s
+dotMatVec : [k][k]Tq -> [k]Tq -> [k]Tq
+dotMatVec A v = [ sum (zipWith mul Tq_row v) | Tq_row <- A ] where
+    mul a b = a * b // 这里省略具体的 Tq 域 Montgomery 乘法细节
+
+// 字节编码 (ByteEncode12)
+// 用于将系数序列化为 pk/dk
+ByteEncode12_Vec : [k]Tq -> [k * 384]Byte
+ByteEncode12_Vec v = zero // 省略具体位压缩实现
+
+// ==========================================
+// 5. [重点] GenMatrix 函数建模
+// ==========================================
+
+/**
+ * GenMatrix
+ * 对应 C 代码: GenMatrix(ctx, p, ctx->keyData.matrix, false)
+ * 逻辑: 使用 SampleNTT 将种子 p 扩展为 k x k 的矩阵
+ */
+GenMatrix : [32]Byte -> [k][k]Tq
+GenMatrix rho = matrix where
+    // 使用双重列表推导式模拟 C 语言的双重循环
+    // row (i) 和 col (j) 被编码并拼接到 rho 后面
+    matrix = [[ SampleNTT (rho # [j] # [i]) 
+              | j <- [0 .. k-1] ] // 内层循环 (列)
+              | i <- [0 .. k-1] ] // 外层循环 (行)
+
+// ==========================================
+// 6. [重点] PkeKeyGen 主函数建模
+// ==========================================
+
+type EncryptionKey = [384 * k + 32]Byte
+type DecryptionKey = [384 * k]Byte
+
+/**
+ * PkeKeyGen
+ * 对应 C 代码: static int32_t PkeKeyGen(...)
+ */
+PkeKeyGen : [32]Byte -> (EncryptionKey, DecryptionKey)
+PkeKeyGen d = (pk, dk) where
+    
+    // --- Step 1: HashFuncG ---
+    // C: (void)memcpy_s(seed, ..., d, ...); seed[len] = k; HashFuncG(...)
+    (rho, sigma) = G (d # [`(k)])
+
+    // --- Step 2: GenMatrix ---
+    // C: GenMatrix(ctx, p, ctx->keyData.matrix, false)
+    A_hat = GenMatrix rho
+
+    // --- Step 3: Sample s (SampleEta1) ---
+    // C: SampleEta1(..., vectorS, &nonce) // nonce 0..k-1
+    s = [ SamplePolyCBD`{eta_1} (PRF sigma N) 
+        | N <- [0 .. k-1] ]
+
+    // --- Step 4: Sample e (SampleEta1) ---
+    // C: SampleEta1(..., vectorT, &nonce) // nonce k..2k-1
+    e = [ SamplePolyCBD`{eta_1} (PRF sigma N) 
+        | N <- [k .. 2 * k - 1] ]
+
+    // --- Step 5: Matrix Multiplication & Add ---
+    // C: MLKEM_MatrixMulAdd(...)
+    // 注意：Cryptol 需显式做 NTT，C 代码通常隐含在 MatrixMul 或预计算中
+    s_hat = NTT_Vec s
+    e_hat = NTT_Vec e
+    t_hat = (dotMatVec A_hat s_hat) + e_hat
+
+    // --- Step 6: Encode & Output ---
+    // C: ByteEncode(pk, t...) 并 memcpy(pk+offset, p)
+    pk = (ByteEncode12_Vec t_hat) # rho
+    
+    // C: ByteEncode(dk, s...)
+    dk = ByteEncode12_Vec s_hat

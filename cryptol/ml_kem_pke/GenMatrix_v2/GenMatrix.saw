@@ -3,7 +3,6 @@ enable_experimental;
 import "GenMatrix.cry" as Model;
 mod <- llvm_load_module "GenMatrix.bc";
 
-// ------------------ Override: HashFuncXOF ------------------
 let HashFuncXOF_spec = do {
     // 忽略 libCtx
     llvm_fresh_pointer (llvm_int 8); 
@@ -29,7 +28,6 @@ let HashFuncXOF_spec = do {
     llvm_return (llvm_term {{ 0 : [32] }});
 };
 
-// ------------------ Override: Parse ------------------
 let Parse_spec = do {
     poly_arr <- llvm_alloc (llvm_array 256 (llvm_int 16));
     
@@ -49,7 +47,6 @@ let Parse_spec = do {
     llvm_return (llvm_term {{ 0 : [32] }});
 };
 
-// ------------------ GenMatrix Core Spec ------------------
 let GenMatrix_Core_spec = do {
     let k = 2;
     let n = 256;
@@ -80,13 +77,7 @@ let GenMatrix_Core_spec = do {
 
     // 4. Verify
     llvm_return (llvm_term {{ 0 : [32] }});
-
-    // 比较拍扁后的结果
-    // 注意: isEnc_val != 0 是将 C 的 i8 转为 Cryptol 的 Bit
     let expected = {{ Model::GenMatrix_Flat rho_val (isEnc_val != 0) }};
-    
-    // 验证整个大数组
-    // 数据类型已经匹配，直接写入
     llvm_points_to output_ptr (llvm_term expected);
 };
 

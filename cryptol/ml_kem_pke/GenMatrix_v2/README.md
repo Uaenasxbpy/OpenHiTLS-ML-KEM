@@ -26,7 +26,5 @@
 4. **结论**: 既然 Cryptol 模型是对的，且 C 代码忠实地实现了 Cryptol 模型，那么 **C 代码的核心算法逻辑就是正确的**。
 
 ### 这一步之后该做什么？
-既然核心逻辑已经证明通过（Proof succeeded），你现在的状态是：**“算法核心正确，工程外壳待定”**
-在论文或报告中，你可以这样陈述：
 > "We formally verified the core matrix generation logic by extracting the kernel loop and memory operations into an isolated unit. We proved that the C implementation correctly handles the transpose logic (for encryption vs. key generation) and correctly iterates over the matrix blocks, matching the functional specification defined in Cryptol."
 > “我们通过将核心循环和内存操作提取为独立单元，对矩阵生成的核心逻辑进行了形式化验证。我们证明了 C 实现正确处理了转置逻辑（用于区分加密和密钥生成），并正确遍历了矩阵块，这与 Cryptol 中定义的功能规范完全一致。”

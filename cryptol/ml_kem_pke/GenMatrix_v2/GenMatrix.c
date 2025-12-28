@@ -1,41 +1,26 @@
-/* * GenMatrix_Core.c
- * 绝对零依赖版：无 #include，直接定义类型，保证编译通过
- */
-
-// ---------------------------------------------------------
-// 1. 手动定义类型 (替代 <stdint.h>)
-// ---------------------------------------------------------
+// 1. 手动定义类型
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef int                int32_t;
 typedef unsigned int       uint32_t;
 
-// ---------------------------------------------------------
 // 2. 常量定义
-// ---------------------------------------------------------
 #define MLKEM_N 256
 #define MLKEM_Q 3329
 #define MLKEM_SEED_LEN 32
 #define MLKEM_XOF_OUTPUT_LENGTH 1000 
 #define CRYPT_SUCCESS 0
 
-// ---------------------------------------------------------
-// 3. 辅助函数 (替代 <string.h>)
-// ---------------------------------------------------------
-
-// 手写一个简单的清零函数，替代 memset
+// 3. 辅助函数
 void simple_mem_zero(uint8_t *dst, int32_t n) {
     for (int32_t i = 0; i < n; i++) {
         dst[i] = 0;
     }
 }
 
-// ---------------------------------------------------------
 // 4. Mock 函数
-// ---------------------------------------------------------
-
 // Mock Hash
-// 注意：SAW 会 override 这个函数，这里的实现只是为了编译
+// 注意：SAW会override这个函数，这里的实现只是为了编译
 int32_t HashFuncXOF(void *libCtx, const uint8_t *in, uint32_t inLen, uint8_t *out, uint32_t outLen) {
     if (out) {
         simple_mem_zero(out, outLen);
@@ -44,14 +29,12 @@ int32_t HashFuncXOF(void *libCtx, const uint8_t *in, uint32_t inLen, uint8_t *ou
 }
 
 // Mock Parse
-// 注意：SAW 会 override 这个函数
+// 注意：SAW会override这个函数
 int32_t Parse(uint16_t *polyNtt, uint8_t *arrayB, uint32_t arrayLen, uint32_t n) {
     return CRYPT_SUCCESS;
 }
 
-// ---------------------------------------------------------
-// 5. 核心逻辑函数 (扁平化版本)
-// ---------------------------------------------------------
+// 5. 核心逻辑函数
 
 /**
  * GenMatrix_Core
@@ -95,7 +78,6 @@ int32_t GenMatrix_Core(uint8_t k,
             
             // 计算扁平化数组的偏移量
             // 逻辑: offset = (i * k + j) * 256
-            // 注意这里要强制转换防溢出，虽然在 SAW 里通常没事
             uint32_t block_idx = (uint32_t)i * k + j;
             uint32_t offset = block_idx * MLKEM_N;
             
