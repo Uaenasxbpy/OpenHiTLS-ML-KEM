@@ -1,0 +1,39 @@
+import "Parse.cry";
+
+let MLKEM_N = 256;
+// 输入给足：24 字节 (足够产生 8 个系数)
+let TEST_ARRAY_LEN = 24; 
+
+let parse_spec = do {
+    // 1. 内存分配
+    polyNtt_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+    llvm_points_to polyNtt_ptr (llvm_term {{ zero:[MLKEM_N][16] }}); // 初始全0
+    
+    arrayB <- llvm_fresh_var "arrayB" (llvm_array TEST_ARRAY_LEN (llvm_int 8));
+    arrayB_ptr <- llvm_alloc_readonly (llvm_array TEST_ARRAY_LEN (llvm_int 8));
+    llvm_points_to arrayB_ptr (llvm_term arrayB);
+    
+    // 2. 设置参数：粮草充足，目标很小
+    let arrayLen = llvm_term {{ `TEST_ARRAY_LEN:[32] }}; // 24
+    let n = llvm_term {{ `Target_N:[32] }};             // 4
+    
+    // 3. 执行
+    llvm_execute_func [polyNtt_ptr, arrayB_ptr, arrayLen, n];
+    
+    // 4. 验证
+    // 获取 Cryptol 的预测 (包含截断后的数组 和 预期返回值)
+    let res = {{ predict_return_value_overflow arrayB }};
+    
+    // 验证返回值 (应该是 0，除非 24个字节全是 0xFF)
+    llvm_return (llvm_term {{ res.1 }});
+    
+    // 【核心验证】
+    // 验证内存状态。
+    // 如果 C 代码没有在第 4 个数停下来，而是继续写了第 5 个数，
+    // C 的 polyNtt 内容就会比 res.0 (截断版) 多出数据。
+    // SAW 比较时就会报错，提示 Counterexample。
+    llvm_points_to polyNtt_ptr (llvm_term {{ res.0 }});
+};
+
+m <- llvm_load_module "parse.bc";
+llvm_verify m "Parse" [] false parse_spec z3;

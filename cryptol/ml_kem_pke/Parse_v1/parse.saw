@@ -1,0 +1,68 @@
+import "Parse.cry";
+// MLKEM_N = 256: 这是我们需要填充的目标系数个数
+let MLKEM_N = 256;
+
+// TEST_ARRAY_LEN = 12: 这是我们给C函数的输入字节长度
+// 这是一个小窗口测试：12字节最多只能产生8个系数，远小于256
+let TEST_ARRAY_LEN = 12; 
+
+let parse_spec = do {
+    // 1. 为输出数组polyNtt分配内存
+    // 在LLVM堆上分配256个16-bit整数的空间
+    polyNtt_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));    
+    // 将这块内存初始化为全 0
+    /* Cryptol模型中，未被填充的数组位置默认是 0。而C的llvm_alloc分配的是脏内存。
+    为了让两者能对比，必须先把 C 的内存清零。
+    */
+    llvm_points_to polyNtt_ptr (llvm_term {{ zero:[MLKEM_N][16] }});
+    
+    // 2. 准备输入数据 arrayB
+    // 创建一个符号变量arrayB，代表 12 个字节
+    // SAW会尝试这12个字节的所有可能取值 (0x00~0xFF)
+    arrayB <- llvm_fresh_var "arrayB" (llvm_array TEST_ARRAY_LEN (llvm_int 8));
+    
+    // 为输入数据分配只读内存
+    arrayB_ptr <- llvm_alloc_readonly (llvm_array TEST_ARRAY_LEN (llvm_int 8));
+    
+    // 将符号变量 arrayB 绑定到指针 arrayB_ptr 上
+    // 这样 C 代码读取指针时，实际上读到的是我们的符号变量
+    llvm_points_to arrayB_ptr (llvm_term arrayB);
+    
+    // 3. 准备标量参数 (uint32_t)
+    let arrayLen = llvm_term {{ `TEST_ARRAY_LEN:[32] }}; // 传给C的长度: 12
+    let n = llvm_term {{ `MLKEM_N:[32] }};               // 传给C的目标: 256
+
+   
+    // 调用 Parse 函数
+    // int32_t Parse(uint16_t *polyNtt, const uint8_t *arrayB, uint32_t arrayLen, uint32_t n)
+    llvm_execute_func [polyNtt_ptr, arrayB_ptr, arrayLen, n];
+
+
+    // 1. 调用Cryptol预言机
+    // 计算在这组输入 arrayB 下，标准的数学结果应该是什么
+    // res.0是系数数组，res.1是计数器
+    let res = {{ parse_iter arrayB }};
+    
+    // 2. 验证内存副作用 (Side Effects)
+    // 检查 C 函数修改后的 polyNtt_ptr 内存内容，是否与 Cryptol 算出的 res.0 完全一致
+    // 这验证了：
+    //  a. 有效系数被正确解析并写入。
+    //  b. 拒绝采样逻辑正确 (不合格的没写)。
+    //  c. 未处理的内存区域保持为 0 (没乱写)。
+    llvm_points_to polyNtt_ptr (llvm_term {{ res.0 }});
+    
+    // 3. 验证返回值 (Return Value)
+    // 逻辑依据：
+    // 输入只有 12 字节 -> 最多产生 8 个系数。
+    // 目标需要 256 个系数。
+    // 8 << 256，因此任务必然失败。
+    // 所以我们断言：C 函数必须返回 -1 (CRYPT_MLKEM_KEYLEN_ERROR)。
+    llvm_return (llvm_term {{ -1:[32] }}); 
+};
+
+// 加载字节码
+m <- llvm_load_module "parse.bc";
+
+// 执行验证
+// 使用 yices 求解器 (通常比 z3 快一点)
+llvm_verify m "Parse" [] false parse_spec yices;

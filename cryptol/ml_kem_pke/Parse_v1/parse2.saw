@@ -1,0 +1,57 @@
+import "Parse.cry";
+
+// 定义常量
+// MLKEM_N = 256: 这是 C 函数内部申请的数组总大小（物理空间）
+let MLKEM_N = 256;
+
+// TEST_ARRAY_LEN = 12: 我们限制输入仅为 12 字节
+// 12 字节理论上最多产生 8 个系数 (12 * 8 / 12 * 2 / 3)
+let TEST_ARRAY_LEN = 12;
+
+let parse_spec = do {
+    // 分配输出缓存 polyNtt
+    // 即使我们只打算填 4 个数，但 C 语言定义的数组是 256 大小，必须分配足额防止越界
+    polyNtt_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+    
+    // 将 C 的内存初始化为全 0。这是为了后续（如果有数据对比）能和 Cryptol 的默认值对应。
+    llvm_points_to polyNtt_ptr (llvm_term {{ zero:[MLKEM_N][16] }});
+    
+    // 创建 12 字节的符号变量 arrayB
+    // SAW 会同时考虑这 12 字节的 2^96 种可能性
+    arrayB <- llvm_fresh_var "arrayB" (llvm_array TEST_ARRAY_LEN (llvm_int 8));
+    
+    // 分配只读内存并绑定符号变量
+    arrayB_ptr <- llvm_alloc_readonly (llvm_array TEST_ARRAY_LEN (llvm_int 8));
+    llvm_points_to arrayB_ptr (llvm_term arrayB);
+
+    // 告诉 C 函数：输入长度是 12
+    let arrayLen = llvm_term {{ `TEST_ARRAY_LEN:[32] }};
+    
+    // 【关键点】告诉 C 函数：我们的目标系数个数 n 是 Target_N (即 4)
+    // 注意：`Target_N 来自 Cryptol 文件。
+    // 因为 12 字节产生 4 个系数是“有可能”的（取决于拒绝率），
+    // 这就创造了一个“有时成功，有时失败”的测试场景。
+    let n = llvm_term {{ `Target_N:[32] }}; 
+    
+    // 执行 C 函数
+    llvm_execute_func [polyNtt_ptr, arrayB_ptr, arrayLen, n];
+    
+    // 【动态预言机】
+    // 我们不再硬编码 {{ 0:[32] }} 或 {{ -1:[32] }}。
+    // 我们调用 Cryptol 函数 `predict_return_value`。
+    // 它会根据当前的 arrayB 算出：
+    //   - 如果有效系数 >= 4，expected_ret 就是 0
+    //   - 如果有效系数 < 4，expected_ret 就是 -1
+    let expected_ret = {{ predict_return_value arrayB }};
+    
+    // 验证 C 的返回值是否与 Cryptol 的预测永远一致
+    // 这意味着 SAW 证明了：无论输入数据质量如何，C 代码总能做出正确的判断。
+    llvm_return (llvm_term expected_ret);
+};
+
+// 加载模块
+m <- llvm_load_module "parse.bc";
+
+// 执行验证
+// 使用 Z3 求解器遍历所有路径
+llvm_verify m "Parse" [] false parse_spec z3;

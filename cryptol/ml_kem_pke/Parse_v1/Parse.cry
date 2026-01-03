@@ -1,0 +1,56 @@
+module Parse where
+
+type MLKEM_Q = 3329
+type MLKEM_N = 256
+type Target_N = 4
+
+to_chunks : [3][8] -> [2][16]
+to_chunks [b0, b1, b2] = [d1, d2]
+  where
+    d1 = (zext b0) + ((zext (b1 && 0x0f)) << 8)
+    d2 = ((zext b1) >> 4) + ((zext b2) << 4)
+
+type State = ([MLKEM_N][16], [32])
+
+step : State -> [3][8] -> State
+step (poly, j) chunk = (poly_final, j_final)
+  where
+    [d1, d2] = to_chunks chunk
+    cond1 = d1 < `MLKEM_Q
+    poly_after_d1 = if cond1 then update poly j d1 else poly
+    j_after_d1    = if cond1 then j + 1 else j
+    cond2 = (d2 < `MLKEM_Q) && (j_after_d1 < `MLKEM_N)
+    poly_final = if cond2 then update poly_after_d1 j_after_d1 d2 else poly_after_d1
+    j_final    = if cond2 then j_after_d1 + 1 else j_after_d1
+
+// 使用{n}泛型，支持任意长度，只要n是3的倍数
+parse_iter : {n} (fin n, n % 3 == 0) => [n][8] -> State
+parse_iter bytes = last states
+  where
+    // split会自动根据输入的长度n进行切分
+    chunks = split bytes : [n/3][3][8]
+    init_state = (zero, 0)
+    states = [init_state] # [ step s c | s <- states | c <- chunks ]
+
+// 截断辅助函数
+truncate_to_n : [MLKEM_N][16] -> [MLKEM_N][16]
+truncate_to_n poly = truncated_poly
+  where
+    mask = [ i < `Target_N | i <- [0 .. (MLKEM_N-1)] ]
+    truncated_poly = [ if m then p else 0 | p <- poly | m <- mask ]
+
+// 预测返回值及截断后的多项式
+predict_return_value_overflow : {n} (fin n, n % 3 == 0) => [n][8] -> ([MLKEM_N][16], [32])
+predict_return_value_overflow bytes = (final_poly, ret_code)
+  where
+    (full_poly, count) = parse_iter bytes
+    
+    // 如果有效系数 >= Target_N，应该返回0，且内存应该被截断
+    ret_code = if count >= `Target_N then 0 else -1
+    
+    final_poly = if count >= `Target_N 
+                 then truncate_to_n full_poly 
+                 else full_poly
+
+predict_return_value : {n} (fin n, n % 3 == 0) => [n][8] -> [32]
+predict_return_value bytes = (predict_return_value_overflow bytes).1
