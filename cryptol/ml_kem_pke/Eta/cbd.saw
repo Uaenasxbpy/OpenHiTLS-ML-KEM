@@ -1,0 +1,72 @@
+import "SamplePolyCBD.cry";
+
+let MLKEM_N = 256;
+
+// ==========================================
+// 场景 1: 验证 eta = 2
+// ==========================================
+let cbd_spec_eta2 = do {
+    // 1. 计算需要的输入字节长度
+    // size = N * eta / 4 = 256 * 2 / 4 = 128
+    let input_len = 128;
+    
+    // 2. 分配 polyF (输出)
+    polyF_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+    
+    // 3. 分配 buf (输入)
+    buf <- llvm_fresh_var "buf_eta2" (llvm_array input_len (llvm_int 8));
+    buf_ptr <- llvm_alloc_readonly (llvm_array input_len (llvm_int 8));
+    llvm_points_to buf_ptr (llvm_term buf);
+    
+    // 4. 设置 eta 参数 (固定为 2)
+    let eta = llvm_term {{ 2:[8] }};
+    
+    // 5. 执行函数
+    llvm_execute_func [polyF_ptr, buf_ptr, eta];
+    
+    // 6. 验证结果
+    // 调用 Cryptol 模型，参数 eta 自动推导为 2
+    let res = {{ sample_poly_cbd`{eta=2} buf }};
+    
+    llvm_points_to polyF_ptr (llvm_term res);
+};
+
+// ==========================================
+// 场景 2: 验证 eta = 3
+// ==========================================
+let cbd_spec_eta3 = do {
+    // 1. 计算需要的输入字节长度
+    // size = N * eta / 4 = 256 * 3 / 4 = 192
+    let input_len = 192;
+    
+    // 2. 分配 polyF
+    polyF_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+    
+    // 3. 分配 buf
+    buf <- llvm_fresh_var "buf_eta3" (llvm_array input_len (llvm_int 8));
+    buf_ptr <- llvm_alloc_readonly (llvm_array input_len (llvm_int 8));
+    llvm_points_to buf_ptr (llvm_term buf);
+    
+    // 4. 设置 eta 参数 (固定为 3)
+    let eta = llvm_term {{ 3:[8] }};
+    
+    // 5. 执行函数
+    llvm_execute_func [polyF_ptr, buf_ptr, eta];
+    
+    // 6. 验证结果
+    // 调用 Cryptol 模型，强制指定 eta=3
+    let res = {{ sample_poly_cbd`{eta=3} buf }};
+    
+    llvm_points_to polyF_ptr (llvm_term res);
+};
+
+// ==========================================
+// 执行验证
+// ==========================================
+m <- llvm_load_module "cbd.bc";
+
+print "Verifying MLKEM_SamplePolyCBD for eta=2 ...";
+llvm_verify m "MLKEM_SamplePolyCBD" [] false cbd_spec_eta2 z3;
+
+print "Verifying MLKEM_SamplePolyCBD for eta=3 ...";
+llvm_verify m "MLKEM_SamplePolyCBD" [] false cbd_spec_eta3 z3;

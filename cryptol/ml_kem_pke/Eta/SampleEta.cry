@@ -1,0 +1,36 @@
+module SampleEta where
+
+// 导入之前的模块
+import SamplePolyCBD
+import NTT
+
+type MLKEM_N = 256
+type K = 3       // 假设验证 Kyber-768
+type ETA1 = 2    // Kyber-768 的参数
+type ETA2 = 2
+type PRF_LEN_1 = 64 * ETA1
+type PRF_LEN_2 = 64 * ETA2
+
+// ==========================================
+// SampleEta1 规范
+// 逻辑: 输入 K 组随机字节 -> CBD -> NTT -> 输出 K 组多项式
+// ==========================================
+sample_eta1_spec : [K][PRF_LEN_1][8] -> [MLKEM_N][16] -> [K][MLKEM_N][16]
+sample_eta1_spec random_streams psi = polys
+  where
+    // 1. 对每一组随机流做 CBD
+    // 注意：这里我们显式指定 eta=2 (ETA1)
+    coeffs = [ sample_poly_cbd`{eta=2} s | s <- random_streams ]
+    
+    // 2. 对每一个系数多项式做 NTT
+    polys = [ ntt_spec c psi | c <- coeffs ]
+
+// ==========================================
+// SampleEta2 规范
+// 逻辑: 输入 K 组随机字节 -> CBD -> 输出 K 组多项式 (无 NTT)
+// ==========================================
+sample_eta2_spec : [K][PRF_LEN_2][8] -> [K][MLKEM_N][16]
+sample_eta2_spec random_streams = polys
+  where
+    // 1. 仅做 CBD
+    polys = [ sample_poly_cbd`{eta=2} s | s <- random_streams ]

@@ -1,0 +1,50 @@
+module SamplePolyCBD where
+
+type MLKEM_N = 256
+
+// 辅助函数：将字节流转换为比特流 (Little Endian Bit Order)
+// C 代码中 buf[0] 的最低位是整个流的第 0 位。
+// Cryptol 默认 [8] 是 Big Endian (index 0 是最高位)，所以我们需要 reverse。
+bytes_to_bits_le : {n} (fin n) => [n][8] -> [8 * n]
+bytes_to_bits_le bytes = join [ reverse b | b <- bytes ]
+
+// 辅助函数：计算比特序列的汉明重量 (Hamming Weight)
+// 输入: 一串比特
+// 输出: 整数 (比特之和)
+hamming_weight : {n} (fin n) => [n] -> [16]
+hamming_weight bits = sum [ if b then 1 else 0 | b <- bits ]
+
+// CBD 单个系数计算逻辑 (数学规范)
+// 参数: eta
+// 输入: 2*eta 个比特
+// 输出: 16位有符号整数
+cbd_coef : {eta} (fin eta) => [2 * eta] -> [16]
+cbd_coef bits = a - b
+  where
+    // 1. 将 2*eta 个比特分成两半
+    // 注意：Cryptol 的 split 是从左到右分，对应 C 的低位到高位
+    [bits_a, bits_b] = split bits : [2][eta]
+    
+    // 2. 计算前半部分的和 a (对应 C 中的 t1 低位部分)
+    a = hamming_weight bits_a
+    
+    // 3. 计算后半部分的和 b (对应 C 中的 t1 高位部分)
+    b = hamming_weight bits_b
+
+// 主函数：SamplePolyCBD 规范
+// 这是一个参数化模型，支持不同的 eta (2 或 3)
+// 输入: 字节数组
+// 输出: 系数数组
+sample_poly_cbd : {eta} (fin eta) => [MLKEM_N * eta / 4][8] -> [MLKEM_N][16]
+sample_poly_cbd bytes = coeffs
+  where
+    // 1. 转成 bit 流 (小端序)
+    all_bits = bytes_to_bits_le bytes
+    
+    // 2. 按照 2*eta 一个单位进行分组
+    // 总比特数 = (N * eta / 4) * 8 = 2 * N * eta
+    // 分组后个数 = (2 * N * eta) / (2 * eta) = N
+    chunks = split all_bits : [MLKEM_N][2 * eta]
+    
+    // 3. 对每组比特应用 CBD 计算
+    coeffs = [ cbd_coef c | c <- chunks ]
