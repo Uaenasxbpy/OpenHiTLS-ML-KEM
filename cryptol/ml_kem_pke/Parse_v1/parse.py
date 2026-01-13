@@ -4,7 +4,9 @@ import sys
 
 # ================= 配置区域 =================
 # 你的工作路径
-WORK_DIR = r"D:\Code\Cryptol\OpenHiTLS-ML-KEM\cryptol\ml_kem_pke\Parse_v1"
+# WORK_DIR = r"D:\Code\Cryptol\OpenHiTLS-ML-KEM\cryptol\ml_kem_pke\Parse_v1"
+# F:\研1\PQC算法验证与优化\Kyber一致性验证\OpenHiTLS-ML-KEM\cryptol\ml_kem_pke\Parse_v1
+WORK_DIR = r"F:\研1\PQC算法验证与优化\Kyber一致性验证\OpenHiTLS-ML-KEM\cryptol\ml_kem_pke\Parse_v1"
 
 # 根据你刚才的日志，你的文件名分别是这三个
 SAW_SCRIPTS = [
