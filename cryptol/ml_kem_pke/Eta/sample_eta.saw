@@ -1,128 +1,97 @@
-// 1. 显式导入所有依赖
+enable_experimental;
 import "SamplePolyCBD.cry";
 import "NTT.cry";
 import "SampleEta.cry";
 
 let MLKEM_N = 256;
-let K = 3;       // Kyber-768
+let K = 3;       
 let ETA1 = 2;
-let PRF_LEN_1 = 128; // 64 * 2
+let PRF_LEN_1 = 128; 
 
 
-// 2. 定义子函数的 Specs
+// CBD 函数规范 (对应 eta=2)
 let cbd_spec = do {
-    // 输出指针
     polyF_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    
-    // 输入 Buffer
     buf <- llvm_fresh_var "cbd_buf" (llvm_array PRF_LEN_1 (llvm_int 8));
     buf_ptr <- llvm_alloc (llvm_array PRF_LEN_1 (llvm_int 8));
     llvm_points_to buf_ptr (llvm_term buf);
-    
     let eta = llvm_term {{ `ETA1:[8] }};
-    
     llvm_execute_func [polyF_ptr, buf_ptr, eta];
-    
-    // 验证后置条件
     llvm_points_to polyF_ptr (llvm_term {{ sample_poly_cbd`{eta=2} buf }});
 };
 
+// NTT 函数规范
 let ntt_spec = do {
     a <- llvm_fresh_var "ntt_in" (llvm_array MLKEM_N (llvm_int 16));
     a_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
     llvm_points_to a_ptr (llvm_term a);
-    
     psi <- llvm_fresh_var "psi" (llvm_array MLKEM_N (llvm_int 16));
-    psi_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+    psi_ptr <- llvm_alloc_readonly (llvm_array MLKEM_N (llvm_int 16));
     llvm_points_to psi_ptr (llvm_term psi);
-    
     llvm_execute_func [a_ptr, psi_ptr];
-    
     llvm_points_to a_ptr (llvm_term {{ ntt_spec a psi }});
 };
 
+// 4. SampleEta1 主验证脚本
+let sample_eta1_spec_proof = do {
+    info_ptr <- llvm_alloc_readonly (llvm_struct "struct.MLKEM_Info");
+    llvm_points_to info_ptr (llvm_struct_value [ llvm_term {{ `K:[8] }}, llvm_term {{ `ETA1:[8] }}, llvm_term {{ 2:[8] }} ]);
 
-let sample_eta1_verification = do {
-    // 1. 准备 Context
-    info_ptr <- llvm_alloc_readonly (llvm_alias "struct.MLKEM_Info");
-    llvm_points_to info_ptr (llvm_struct_value [
-        llvm_term {{ 3:[8] }}, // k
-        llvm_term {{ 2:[8] }}, // eta1
-        llvm_term {{ 2:[8] }}  // eta2
-    ]);
-    
-    ctx_ptr <- llvm_alloc_readonly (llvm_alias "struct.CRYPT_ML_KEM_Ctx");
-    llvm_points_to ctx_ptr (llvm_struct_value [
-        llvm_null,  // libCtx
-        info_ptr    // info pointer
-    ]);
+    ctx_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_ML_KEM_Ctx");
+    let null_ptr = llvm_null; // libCtx 为空
+    llvm_points_to ctx_ptr (llvm_struct_value [ null_ptr, info_ptr ]);
 
-    // 2. 准备 Digest 和 Nonce
-    digest <- llvm_fresh_var "digest" (llvm_array 32 (llvm_int 8));
     digest_ptr <- llvm_alloc_readonly (llvm_array 32 (llvm_int 8));
+    digest <- llvm_fresh_var "digest" (llvm_array 32 (llvm_int 8));
     llvm_points_to digest_ptr (llvm_term digest);
 
-    nonce_val <- llvm_fresh_var "nonce" (llvm_int 8);
-    nonce_ptr <- llvm_alloc (llvm_int 8);
-    llvm_points_to nonce_ptr (llvm_term nonce_val);
+    polyS_ptr <- llvm_alloc (llvm_array K (llvm_pointer (llvm_int 16)));
 
-    // 3. 注入 Mock PRF 数据
-    let row_len = 192;
-    rand_rows <- llvm_fresh_var "mock_prf_data" (llvm_array 4 (llvm_array row_len (llvm_int 8)));
-    
-    llvm_alloc_global "MOCK_PRF_SOURCE";
-    let mock_src_ptr = llvm_global "MOCK_PRF_SOURCE";
-    llvm_points_to mock_src_ptr (llvm_term rand_rows);
-
-    llvm_alloc_global "mock_call_count";
-    let cnt_ptr = llvm_global "mock_call_count";
-    llvm_points_to cnt_ptr (llvm_term {{ 0:[32] }});
-
-    // 4. 准备输出指针数组 (polyS)
     p0 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
     p1 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
     p2 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    
-    polyS_ptr <- llvm_alloc_readonly (llvm_array K (llvm_pointer (llvm_int 16)));
     llvm_points_to polyS_ptr (llvm_array_value [p0, p1, p2]);
 
-    // 5. 执行 SampleEta1
+    nonce_ptr <- llvm_alloc (llvm_int 8);
+    let nonce_val = {{ 0:[8] }}; 
+    llvm_points_to nonce_ptr (llvm_term nonce_val);
+
+    rand_rows <- llvm_fresh_var "rand_rows" (llvm_array K (llvm_array PRF_LEN_1 (llvm_int 8)));
+
+    llvm_alloc_global "MOCK_PRF_DATA";
+    let mock_data_ptr = llvm_global "MOCK_PRF_DATA";
+
+    let flat_rand_data = {{ join rand_rows }};
+    
+    let mock_data_full = {{ flat_rand_data # zero : [1024][8] }};
+    llvm_points_to mock_data_ptr (llvm_term mock_data_full);
+
+    psi_mem <- llvm_alloc_readonly (llvm_array MLKEM_N (llvm_int 16));
+    psi <- llvm_fresh_var "psi" (llvm_array MLKEM_N (llvm_int 16));
+    llvm_points_to psi_mem (llvm_term psi);
+
+    llvm_alloc_global "PRE_COMPUT_TABLE_NTT_MONT";
+    llvm_points_to (llvm_global "PRE_COMPUT_TABLE_NTT_MONT") psi_mem;
+
     llvm_execute_func [ctx_ptr, digest_ptr, polyS_ptr, nonce_ptr];
 
-
-    // 6. 验证 Nonce
-    llvm_points_to nonce_ptr (llvm_term {{ nonce_val + 3 }});
-
-    // 7. 验证输出多项式
-    // Cryptol: 取前3行，每行取前128字节
-    let inputs = {{ [ take`{128} r | r <- take`{3} rand_rows ] }};
-    
-    psi_table <- llvm_fresh_var "psi_table" (llvm_array MLKEM_N (llvm_int 16));
-    psi_mem <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    llvm_points_to psi_mem (llvm_term psi_table);
-    
-    llvm_alloc_global "PRE_COMPUT_TABLE_NTT_MONT";
-    let global_psi_ptr = llvm_global "PRE_COMPUT_TABLE_NTT_MONT";
-    // 将全局变量的值设为 psi_mem 的地址
-    llvm_points_to global_psi_ptr psi_mem;
-
-    // 计算预期结果
-    let expected = {{ sample_eta1_spec inputs psi_table }};
-
-    llvm_points_to p0 (llvm_term {{ expected @ 0 }});
-    llvm_points_to p1 (llvm_term {{ expected @ 1 }});
-    llvm_points_to p2 (llvm_term {{ expected @ 2 }});
-    
+    llvm_points_to nonce_ptr (llvm_term {{ nonce_val + `K }});
+    let expected_polys = {{ sample_eta1_spec rand_rows psi }};
+    llvm_points_to p0 (llvm_term {{ expected_polys @ 0 }});
+    llvm_points_to p1 (llvm_term {{ expected_polys @ 1 }});
+    llvm_points_to p2 (llvm_term {{ expected_polys @ 2 }});
     llvm_return (llvm_term {{ 0:[32] }});
 };
 
+print "Loading module...";
 m <- llvm_load_module "sample_eta.bc";
-
-print "Assuming sub-functions spec...";
-// 生成 override spec
+print "Assuming MLKEM_SamplePolyCBD spec...";
 cbd_ov <- llvm_unsafe_assume_spec m "MLKEM_SamplePolyCBD" cbd_spec;
+
+print "Assuming MLKEM_ComputNTT spec...";
 ntt_ov <- llvm_unsafe_assume_spec m "MLKEM_ComputNTT" ntt_spec;
 
-print "Verifying SampleEta1 ...";
-// 将 overrides 传入验证
-llvm_verify m "SampleEta1" [cbd_ov, ntt_ov] false sample_eta1_verification z3;
+print "Verifying SampleEta1...";
+llvm_verify m "SampleEta1" [cbd_ov, ntt_ov] true sample_eta1_spec_proof z3;
+
+print "Done.";

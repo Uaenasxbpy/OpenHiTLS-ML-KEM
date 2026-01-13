@@ -26,9 +26,9 @@ typedef struct {
 } CRYPT_ML_KEM_Ctx;
 
 // 全局指针定义 (给 SAW 挂载用)
-// int16_t *PRE_COMPUT_TABLE_NTT_MONT = 0; 
+int16_t *PRE_COMPUT_TABLE_NTT_MONT = 0; 
 // 声明为 extern，并且绝对不要赋值！
-extern int16_t *PRE_COMPUT_TABLE_NTT_MONT;
+// extern int16_t *PRE_COMPUT_TABLE_NTT_MONT;
 
 // ==========================================
 // 3. 辅助工具：手写内存拷贝
@@ -46,25 +46,34 @@ static void simple_memcpy(uint8_t *dst, const uint8_t *src, int32_t len) {
 void MLKEM_SamplePolyCBD(int16_t *polyF, const uint8_t *buf, uint8_t eta);
 void MLKEM_ComputNTT(int16_t *a, const int16_t *psi);
 
-// ==========================================
-// 5. Mock PRF (打桩函数)
-// ==========================================
+/// [新增] 在 sample_eta.c 中添加
 
-// 定义全局缓冲区，SAW 往这里填符号数据
-// 4行，每行192字节 (足够容纳 64 * 3)
-uint8_t MOCK_PRF_SOURCE[4][192]; 
-int32_t mock_call_count = 0;
+// 1. 定义一个全局缓冲区，SAW 将把符号变量 rand_rows 写入这里
+// 大小计算：MLKEM_K_MAX * MLKEM_PRF_BLOCKSIZE * MLKEM_ETA1_MAX
+// 4 * 64 * 3 = 768 字节足够了，这里给 1024 安全
+uint8_t MOCK_PRF_DATA[1024]; 
 
-int32_t PRF(void *ctx, uint8_t *key, int key_len, uint8_t *out, int out_len)
-{
-    // 简单的越界保护
-    if (mock_call_count >= 4) return -1;
+// 2. 实现 Mock PRF
+// 逻辑：根据 nonce (输入种子的最后一个字节) 决定从缓冲区的哪个位置读取数据
+int32_t PRF(void *ctx, const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen) {
+    // 种子 q 的结构是: seed (32 bytes) || nonce (1 byte)
+    // 所以 nonce 在 in[inlen - 1]
+    uint8_t nonce = in[inlen - 1];
     
-    // 使用手写的拷贝函数
-    // 从全局符号数组 MOCK_PRF_SOURCE 读取数据填入 out
-    simple_memcpy(out, MOCK_PRF_SOURCE[mock_call_count], out_len);
+    // 计算偏移量：每个 nonce 对应一块随机数
+    // 假设每次取的数据量是固定的 (MLKEM_PRF_BLOCKSIZE * eta1 = 128 bytes)
+    // 注意：这里需要与 SAW 脚本中的布局保持一致
+    size_t offset = nonce * outlen; 
     
-    mock_call_count++;
+    if (offset + outlen > sizeof(MOCK_PRF_DATA)) {
+        return -1; // 越界保护
+    }
+
+    // 模拟生成随机数：直接从全局缓冲区拷贝
+    for(size_t i = 0; i < outlen; i++) {
+        out[i] = MOCK_PRF_DATA[offset + i];
+    }
+
     return CRYPT_SUCCESS;
 }
 
