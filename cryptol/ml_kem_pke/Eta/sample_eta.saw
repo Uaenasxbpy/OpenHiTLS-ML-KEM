@@ -1,6 +1,5 @@
 enable_experimental;
 
-// ===== 1. Imports & Constants =====
 import "SamplePolyCBD.cry";
 import "MLKEM_ComputNTT.cry";
 import "SampleEta.cry";
@@ -20,12 +19,6 @@ let PRF_LEN_2 = 128;
 let i8p  = llvm_pointer (llvm_int 8);
 let i16p = llvm_pointer (llvm_int 16);
 
-// =====================================================
-// 2. 修复后的 Havoc Specs
-// =====================================================
-
-// --- PRF (Eta1) ---
-// 返回 int32_t，所以需要 llvm_return
 let prf_havoc_eta1 = do {
   ctx_t <- llvm_fresh_var "ctx" (llvm_int 64);
 
@@ -74,7 +67,6 @@ let prf_havoc_eta2 = do {
 };
 
 // --- CBD (Eta1) ---
-// 返回 void，[删除] llvm_return
 let cbd_havoc_eta1 = do {
   poly_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
   
@@ -91,11 +83,9 @@ let cbd_havoc_eta1 = do {
   poly_val <- llvm_fresh_var "poly_havoc" (llvm_array MLKEM_N (llvm_int 16));
   llvm_points_to poly_ptr (llvm_term poly_val);
 
-  // [Fix] Void 函数不需要 return
 };
 
 // --- CBD (Eta2) ---
-// 返回 void，[删除] llvm_return
 let cbd_havoc_eta2 = do {
   poly_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
   
@@ -116,7 +106,6 @@ let cbd_havoc_eta2 = do {
 };
 
 // --- NTT ---
-// 返回 void，[删除] llvm_return
 let ntt_havoc = do {
   a_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
   a_in  <- llvm_fresh_var "a_in" (llvm_array MLKEM_N (llvm_int 16));
@@ -131,13 +120,8 @@ let ntt_havoc = do {
   a_out <- llvm_fresh_var "a_out_havoc" (llvm_array MLKEM_N (llvm_int 16));
   llvm_points_to a_ptr (llvm_term a_out);
 
-  // [Fix] Void 函数不需要 return
 };
 
-
-// =====================================================
-// 3. Glue Codes
-// =====================================================
 
 let info_type = llvm_struct_type [
     llvm_int 8, llvm_int 8, llvm_int 8, llvm_int 8, llvm_int 8, 
@@ -204,7 +188,6 @@ let sample_eta1_glue = do {
   llvm_execute_func [ctx_ptr, digest_ptr, polyS_ptr, nonce_ptr];
 
   // ---- verify ----
-  // 验证 nonce 是否增加了 K
   llvm_points_to nonce_ptr (llvm_term {{ start_nonce + `K }});
 
   llvm_return (llvm_term {{ 0:[32] }});
@@ -251,10 +234,7 @@ let sample_eta2_glue = do {
   llvm_return (llvm_term {{ 0:[32] }});
 };
 
-// =====================================================
 // 4. Run Verification
-// =====================================================
-
 print "Registering overrides...";
 prf_ov1 <- llvm_unsafe_assume_spec m "PRF"                 prf_havoc_eta1;
 prf_ov2 <- llvm_unsafe_assume_spec m "PRF"                 prf_havoc_eta2;
@@ -262,10 +242,10 @@ cbd_ov1 <- llvm_unsafe_assume_spec m "MLKEM_SamplePolyCBD" cbd_havoc_eta1;
 cbd_ov2 <- llvm_unsafe_assume_spec m "MLKEM_SamplePolyCBD" cbd_havoc_eta2;
 ntt_ov  <- llvm_unsafe_assume_spec m "MLKEM_ComputNTT"     ntt_havoc;
 
-print "Verifying SampleEta1 (glue only)...";
+print "Verifying SampleEta1...";
 llvm_verify m "SampleEta1" [prf_ov1, cbd_ov1, ntt_ov] true sample_eta1_glue w4_abc_verilog;
 
-print "Verifying SampleEta2 (glue only)...";
+print "Verifying SampleEta2...";
 llvm_verify m "SampleEta2" [prf_ov2, cbd_ov2] true sample_eta2_glue w4_abc_verilog;
 
 print "Done.";
