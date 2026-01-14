@@ -1,35 +1,37 @@
-import "NTT.cry";
-
+enable_experimental;
+import "MontgomeryReduction.cry";
+import "BarrettReduction.cry";
+import "MLKEM_ComputNTT.cry"; 
+m <- llvm_load_module "ntt.bc";
 let MLKEM_N = 256;
+let mont_spec = do {
+    a <- llvm_fresh_var "a" (llvm_int 32);
+    llvm_execute_func [llvm_term a];
+    llvm_return (llvm_term {{ montgomery_reduction a }});
+};
+let barrett_spec = do {
+    a <- llvm_fresh_var "a" (llvm_int 16);
+    llvm_execute_func [llvm_term a];
+    llvm_return (llvm_term {{ barrett_reduction a }});
+};
+print "Verifying MontgomeryReduction...";
+mont_ov <- llvm_verify m "MontgomeryReduction" [] true mont_spec z3;
+print "Verifying BarrettReduction...";
+barrett_ov <- llvm_verify m "BarrettReduction" [] true barrett_spec z3;
 
-// NTT 验证配置
 let ntt_spec = do {
-    // 1. 内存分配
-    // 输入/输出数组 a (Read-Write)
     a <- llvm_fresh_var "a" (llvm_array MLKEM_N (llvm_int 16));
     a_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
     llvm_points_to a_ptr (llvm_term a);
-    
-    // 辅助表 psi (Read-Only)
-    psi <- llvm_fresh_var "psi" (llvm_array MLKEM_N (llvm_int 16));
-    psi_ptr <- llvm_alloc_readonly (llvm_array MLKEM_N (llvm_int 16));
-    llvm_points_to psi_ptr (llvm_term psi);
-
-    // 2. 执行 C 函数
+    psi_ptr <- llvm_alloc_readonly (llvm_array 129 (llvm_int 16));
+    llvm_points_to psi_ptr (llvm_term {{ psi_table }});
     llvm_execute_func [a_ptr, psi_ptr];
-
-    // 3. 验证结果
-    // 调用 Cryptol 模型计算预期结果
-    let res = {{ ntt_spec a psi }};
     
-    // 检查 C 函数原地修改后的 a 是否与 Cryptol 结果一致
+    let res = {{ mlkem_computNTT a psi_table }};
     llvm_points_to a_ptr (llvm_term res);
 };
 
-// 加载模块
-m <- llvm_load_module "ntt.bc";
+print "Verifying MLKEM_ComputNTT using overrides...";
+llvm_verify m "MLKEM_ComputNTT" [mont_ov, barrett_ov] false ntt_spec w4_abc_verilog;
 
-// 设置证明超时时间 (NTT 比较复杂，可能需要一点时间)
-// 或者更换求解器为 yices / cvc4 如果 z3 卡住
-print "Verifying MLKEM_ComputNTT ...";
-llvm_verify m "MLKEM_ComputNTT" [] false ntt_spec z3;
+print "Done.";

@@ -6,7 +6,7 @@
 #define MLKEM_Q_INV_BETA -3327 // 0xF301
 
 // 辅助函数定义
-static inline int16_t BarrettReduction(int16_t a)
+int16_t BarrettReduction(int16_t a)
 {
     const int16_t v = ((1 << 26) + MLKEM_Q / 2) / MLKEM_Q;
     int16_t t = ((int32_t)v * a + (1 << 25)) >> 26;
@@ -14,7 +14,7 @@ static inline int16_t BarrettReduction(int16_t a)
     return a - t;
 }
 
-static inline int16_t MontgomeryReduction(int32_t a)
+int16_t MontgomeryReduction(int32_t a)
 {
     int16_t t = (int16_t)a * MLKEM_Q_INV_BETA;
     t = (a - (int32_t)t * MLKEM_Q) >> 16;
@@ -48,3 +48,4 @@ void MLKEM_ComputNTT(int16_t *a, const int16_t *psi)
         a[i] = BarrettReduction(a[i]);
     }
 }
+// clang -g -c -emit-llvm ntt.c -o ntt.bc

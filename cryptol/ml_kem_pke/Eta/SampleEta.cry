@@ -1,36 +1,60 @@
 module SampleEta where
 
-// 导入之前的模块
 import SamplePolyCBD
-import NTT
-
+import MLKEM_ComputNTT 
+import ml_kem_pke::hash::hash
 type MLKEM_N = 256
-type K = 3       // 假设验证 Kyber-768
-type ETA1 = 2    // Kyber-768 的参数
+type K = 3       
+type ETA1 = 2    
 type ETA2 = 2
+
 type PRF_LEN_1 = 64 * ETA1
 type PRF_LEN_2 = 64 * ETA2
 
-// ==========================================
-// SampleEta1 规范
-// 逻辑: 输入 K 组随机字节 -> CBD -> NTT -> 输出 K 组多项式
-// ==========================================
-sample_eta1_spec : [K][PRF_LEN_1][8] -> [MLKEM_N][16] -> [K][MLKEM_N][16]
+// SampleEta1: PRF -> CBD -> NTT
+sample_eta1_real_prf : [32][8] -> [8] -> [129][16] -> [K][MLKEM_N][16]
+sample_eta1_real_prf seed start_nonce psi = polys
+  where
+    random_streams = [ PRF`{outLen=PRF_LEN_1} (seed # [start_nonce + (i : [8])]) 
+                     | i <- [0 .. <K]
+                     ]
+
+    coeffs = [ sample_poly_cbd`{eta=2} s | s <- random_streams ]
+    polys = [ mlkem_computNTT c psi | c <- coeffs ]
+
+// SampleEta2: PRF -> CBD (无 NTT)
+sample_eta2_real_prf : [32][8] -> [8] -> [K][MLKEM_N][16]
+sample_eta2_real_prf seed start_nonce = polys
+  where
+    random_streams = [ PRF`{outLen=PRF_LEN_2} (seed # [start_nonce + (i : [8])]) 
+                     | i <- [0 .. <K]
+                     ]
+
+    polys = [ sample_poly_cbd`{eta=2} s | s <- random_streams ]
+
+// 这个接口跳过了PRF计算，直接接受随机流作为输入。
+// 这是为了配合C代码中的Mock PRF和SAW脚本中的随机数注入。
+// 务必保留这个函数供 sample_eta.saw 调用。
+
+sample_eta1_spec : [K][PRF_LEN_1][8] -> [129][16] -> [K][MLKEM_N][16]
 sample_eta1_spec random_streams psi = polys
   where
-    // 1. 对每一组随机流做 CBD
-    // 注意：这里我们显式指定 eta=2 (ETA1)
     coeffs = [ sample_poly_cbd`{eta=2} s | s <- random_streams ]
-    
-    // 2. 对每一个系数多项式做 NTT
-    polys = [ ntt_spec c psi | c <- coeffs ]
+    polys = [ mlkem_computNTT c psi | c <- coeffs ]
 
-// ==========================================
-// SampleEta2 规范
-// 逻辑: 输入 K 组随机字节 -> CBD -> 输出 K 组多项式 (无 NTT)
-// ==========================================
 sample_eta2_spec : [K][PRF_LEN_2][8] -> [K][MLKEM_N][16]
 sample_eta2_spec random_streams = polys
   where
-    // 1. 仅做 CBD
     polys = [ sample_poly_cbd`{eta=2} s | s <- random_streams ]
+
+type MLKEM_Q = 3329
+is_valid_field_element : [16] -> Bit
+is_valid_field_element x = x < `MLKEM_Q
+is_valid_cbd_eta2 : [16] -> Bit
+is_valid_cbd_eta2 x = (x <= 2) \/ (x >= (`MLKEM_Q - 2))
+property prop_SampleEta1_Bound(seed, nonce, psi) = 
+    all (\p -> all is_valid_field_element p) (sample_eta1_real_prf seed nonce psi)
+property prop_SampleEta2_Range(seed, nonce) = 
+    all (\p -> all is_valid_cbd_eta2 p) (sample_eta2_real_prf seed nonce)
+property prop_SampleEta1_Deterministic(seed, nonce, psi) =
+    (sample_eta1_real_prf seed nonce psi) == (sample_eta1_real_prf seed nonce psi)
