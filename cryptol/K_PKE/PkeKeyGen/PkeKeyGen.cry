@@ -1,4 +1,4 @@
-module MLKEM_KeyGen where
+module K_PKE::PkeKeyGen::PkeKeyGen where
 
 import ml_kem_pke::hash::hash
 import ml_kem_pke::GenMatrix::GenMatrix

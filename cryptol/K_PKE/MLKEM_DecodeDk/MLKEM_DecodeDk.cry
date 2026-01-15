@@ -1,4 +1,4 @@
-module MLKEM_DecodeDk where
+module K_PKE::MLKEM_DecodeDk::MLKEM_DecodeDk where
 
 import ml_kem_pke::En_Decode::Encode_Decode
 import K_PKE::MLKEM_DecodeEk::MLKEM_DecodeEk // 导入上一步写好的 EK 解码模块
