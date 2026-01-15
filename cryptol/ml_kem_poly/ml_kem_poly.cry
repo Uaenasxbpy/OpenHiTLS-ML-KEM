@@ -1,4 +1,6 @@
-module MLKEM_Poly where
+module ml_kem_poly::ml_kem_poly where
+// 建模PolyReduce函数
+import ml_kem_poly::BarrettReduction as BR
 
 // Kyber / ML-KEM 的模数 q
 MLKEM_Q : [32]
@@ -148,8 +150,7 @@ circMulAdd dest src1 src2 factor = join [ blockOut i | i <- [0 .. 63] ]
                      negF
 
 
-// 建模PolyReduce函数
-import BarrettReduction as BR
+
 // type N = 256
 polyReduce :[N][16] -> [N][16]
 polyReduce poly = [ BR::barrett_reduction x | x <- poly ]

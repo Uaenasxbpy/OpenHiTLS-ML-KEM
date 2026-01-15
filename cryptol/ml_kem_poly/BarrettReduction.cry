@@ -1,4 +1,4 @@
-module BarrettReduction where
+module ml_kem_poly::BarrettReduction where
 MLKEM_Q : [16]
 MLKEM_Q = 3329
 // 常数 v = floor(2^26 / Q + 1/2) = 20159

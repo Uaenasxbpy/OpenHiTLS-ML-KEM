@@ -1,0 +1,43 @@
+module K_PKE::MLKEM_DecodeEk::MLKEM_DecodeEk where
+import ml_kem_pke::GenMatrix::GenMatrix
+import ml_kem_pke::En_Decode::Encode_Decode
+
+type MLKEM_N = 256
+type Byte = [8]
+type K = 3  // ML-KEM-768
+
+// C 代码中的 MLKEM_CIPHER_LEN = 384
+type CIPHER_LEN = 384 
+type EK_LEN = CIPHER_LEN * K + 32
+
+to_16bit : [MLKEM_N][12] -> [MLKEM_N][16]
+to_16bit poly = [ zext c | c <- poly ]
+
+MLKEM_DecodeEk : [EK_LEN]Byte -> ([K][K][MLKEM_N][16], [K][MLKEM_N][16])
+MLKEM_DecodeEk ek = (matrixA, vectorT)
+  where
+
+    packed_t : [K * CIPHER_LEN]Byte
+    packed_t = take`{K * CIPHER_LEN} ek
+
+    // 取后部: seed rho
+    rho : [32]Byte
+    rho = drop`{K * CIPHER_LEN} ek
+    matrixA = gen_matrix`{k=K} rho False
+    t_chunks : [K][CIPHER_LEN]Byte
+    t_chunks = split packed_t
+    vectorT = [ to_16bit (DecodeBits12 chunk) | chunk <- t_chunks ]
+
+property prop_Decode_Inverse_Encode (coeffs : [K][MLKEM_N][12]) =
+    vectorT_reconstructed == coeffs_16
+    where
+       encoded = join [ EncodeBits12 c | c <- coeffs ]
+       chunks = split`{parts=K} encoded
+       vectorT_reconstructed = [ to_16bit (DecodeBits12 chunk) | chunk <- chunks ]
+       coeffs_16 = [ to_16bit c | c <- coeffs ]
+
+property prop_Matrix_Deterministic ek =
+    mA1 == mA2
+    where
+        (mA1, _) = MLKEM_DecodeEk ek
+        (mA2, _) = MLKEM_DecodeEk ek

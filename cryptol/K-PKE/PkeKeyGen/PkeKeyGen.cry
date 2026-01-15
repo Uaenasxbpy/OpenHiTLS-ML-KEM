@@ -1,0 +1,56 @@
+module MLKEM_KeyGen where
+
+import ml_kem_pke::hash::hash
+import ml_kem_pke::GenMatrix::GenMatrix
+import ml_kem_pke::Eta::SampleEta
+import ml_kem_poly::ml_kem_poly
+import ml_kem_pke::En_Decode::Encode_Decode
+
+type MLKEM_N = 256
+type Byte = [8]
+type K = 3 
+PkeKeyGen : [32]Byte -> 
+            [8] -> 
+            [129][16] -> 
+            [128][16] -> 
+            ([384*K + 32]Byte, [384*K]Byte)
+
+PkeKeyGen d k_byte psi zetas = (pk, dk)
+  where
+    // Step 1: (p,q) = G(d || k)
+    seed_input = d # [k_byte]
+    (p, q) = HashFuncG seed_input
+    
+    // Step 2-7: GenMatrix
+    matrixA = gen_matrix`{k=3} p False
+
+    // Step 8-11: SampleEta1 -> vectorS
+    vectorS = sample_eta1_real_prf q 0 psi
+
+    // Step 12-15: SampleEta1 -> vectorE (vectorT init)
+    vectorE = sample_eta1_real_prf q k_byte psi
+
+    // Step 16: MatrixMulAdd (Result in [16] bits)
+    vectorT = matrixMulAdd`{k=3} matrixA vectorS vectorE zetas
+
+    pk_poly_bytes = join [ EncodeBits12 (to_12bit poly) | poly <- vectorT ]
+    pk = pk_poly_bytes # p
+
+    dk = join [ EncodeBits12 (to_12bit poly) | poly <- vectorS ]
+
+to_12bit : [MLKEM_N][16] -> [MLKEM_N][12]
+to_12bit poly = [ fix_neg c | c <- poly ]
+  where
+    // MLKEM_Q = 3329
+    fix_neg : [16] -> [12]
+    fix_neg c = 
+      if c >=$ 0 then   
+         (drop c)       
+      else
+         (drop (c + 3329)) 
+
+property prop_PkeKeyGen_Deterministic d k_byte psi zetas = 
+    pk1 == pk2 /\ dk1 == dk2
+    where 
+      (pk1, dk1) = PkeKeyGen d k_byte psi zetas
+      (pk2, dk2) = PkeKeyGen d k_byte psi zetas

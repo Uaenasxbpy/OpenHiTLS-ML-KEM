@@ -1,7 +1,7 @@
-module SampleEta where
+module ml_kem_pke::Eta::SampleEta where
 
-import SamplePolyCBD
-import MLKEM_ComputNTT 
+import ml_kem_pke::Eta::SamplePolyCBD
+import ml_kem_pke::Eta::MLKEM_ComputNTT 
 import ml_kem_pke::hash::hash
 type MLKEM_N = 256
 type K = 3       

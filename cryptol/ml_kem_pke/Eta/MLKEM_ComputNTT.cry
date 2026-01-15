@@ -1,6 +1,6 @@
-module MLKEM_ComputNTT where
-import MontgomeryReduction as MR
-import BarrettReduction   as BR
+module ml_kem_pke::Eta::MLKEM_ComputNTT where
+import ml_kem_pke::Eta::MontgomeryReduction as MR
+import ml_kem_pke::Eta::BarrettReduction   as BR
 type MLKEM_N      = 256
 type MLKEM_N_HALF = 128
 

@@ -1,4 +1,4 @@
-module MontgomeryReduction where
+module ml_kem_pke::Eta::MontgomeryReduction where
 MLKEM_Q : [32]
 MLKEM_Q = 3329
 MLKEM_Q_INV_BETA : [16]

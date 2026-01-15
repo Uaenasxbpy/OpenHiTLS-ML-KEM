@@ -1,4 +1,4 @@
-module SamplePolyCBD where
+module ml_kem_pke::Eta::SamplePolyCBD where
 
 type MLKEM_N = 256
 

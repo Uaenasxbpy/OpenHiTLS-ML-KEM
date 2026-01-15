@@ -1,4 +1,4 @@
-module Encode_Decode where
+module ml_kem_pke::En_Decode::Encode_Decode where
 
 // -----------------------------------------------------------------------------
 // 1. 常量定义

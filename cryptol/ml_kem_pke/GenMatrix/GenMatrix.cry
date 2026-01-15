@@ -1,4 +1,4 @@
-module GenMatrix where
+module ml_kem_pke::GenMatrix::GenMatrix where
 
 import ml_kem_pke::hash::hash
 
