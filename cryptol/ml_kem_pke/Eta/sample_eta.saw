@@ -1,5 +1,5 @@
 enable_experimental;
-
+// $env:CRYPTOLPATH = "F:\研1\PQC算法验证与优化\Kyber一致性验证\OpenHiTLS-ML-KEM\cryptol"
 import "SamplePolyCBD.cry";
 import "MLKEM_ComputNTT.cry";
 import "SampleEta.cry";

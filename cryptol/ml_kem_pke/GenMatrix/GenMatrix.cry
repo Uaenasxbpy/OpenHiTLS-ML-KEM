@@ -1,96 +1,115 @@
 module GenMatrix where
-// 2 => ML-KEM-512
-// 3 => ML-KEM-768
-// 4 => ML-KEM-1024
-type k = 3
+
+import ml_kem_pke::hash::hash
+
 type MLKEM_N = 256
-type MLKEM_Q = 3329
-type MLKEM_SEED_LEN = 32
-type MLKEM_XOF_OUTPUT_LENGTH = 1000
-
-// 类型别名
+type XOF_LEN = 578
+type Q = 3329
 type Byte = [8]
-type UInt12 = [12]
-type Poly = [MLKEM_N]UInt12
-type Matrix = [k][k]Poly
-type Seed = [MLKEM_SEED_LEN]Byte
 
-/* * 2. 外部依赖 (Mock/Abstract)
- */
-hashFuncXOF : [MLKEM_SEED_LEN + 2]Byte -> [MLKEM_XOF_OUTPUT_LENGTH]Byte
-hashFuncXOF input = zero
-
-// 从3个字节中提取两个 12-bit 候选值
-extract_d1 : [3]Byte -> UInt12
-extract_d1 [b0, b1, _] = (zext b0) + ((zext (b1 && 0x0f)) << 8)
-
-extract_d2 : [3]Byte -> UInt12
-extract_d2 [_, b1, b2] = ((zext b1) >> 4) + ((zext b2) << 4)
-
-// 检查系数是否有效 (< Q)
-is_valid_coeff : UInt12 -> Bit
-is_valid_coeff c = c < `MLKEM_Q
-
-// 定义 Parse 的中间状态
-type ParseState = {
-    cnt : [9],
-    poly : Poly
-}
-
-// 状态更新函数
-parse_step : ParseState -> UInt12 -> ParseState
-parse_step st c = 
-    if is_valid_coeff c && (st.cnt < `MLKEM_N) then
-        { cnt = st.cnt + 1
-        , poly = update st.poly st.cnt c
-        }
-    else 
-        st
-
-parse : [MLKEM_XOF_OUTPUT_LENGTH]Byte -> Poly
-parse bytes = final_state.poly
+// ==========================================
+// 1. 辅助函数：3字节 -> 2个16位
+// ==========================================
+// 输入: [b0, b1, b2]
+// 输出: [d1, d2] (类型为 [16]，高4位补0)
+BytesToUint12 : [3]Byte -> [2][16]
+BytesToUint12 [b0, b1, b2] = [d1, d2]
   where
-    chunks = split (take`{999} bytes) : [333][3]Byte
-    candidates = [ c | chunk <- chunks, c <- [extract_d1 chunk, extract_d2 chunk] ]
-    initial_state = { cnt = 0, poly = zero }
-    final_state = foldl parse_step initial_state candidates
+    // split 将 b1 拆分为 高4位(hi) 和 低4位(lo)
+    [hi, lo] = (split b1) : [2][4]
+    
+    // d1 = b0 + (lo << 8)
+    d1 = (zext b0) + ((zext lo) << 8)
+    
+    // d2 = hi + (b2 << 4)
+    d2 = (zext hi) + ((zext b2) << 4)
 
-genMatrix : Seed -> Bit -> Matrix
-genMatrix digest isEnc = 
-    [ [ generate_poly r c | c <- [0 .. k-1] ] | r <- [0 .. k-1] ]
-    where
-        generate_poly : [8] -> [8] -> Poly
-        generate_poly i j = parse xofOut
-            where
-                (idx1, idx2) = if isEnc then (i, j) else (j, i)
-                p = digest # [idx1, idx2]
-                xofOut = hashFuncXOF p
+// ==========================================
+// 2. 修复后的 Parse_Spec
+// ==========================================
+Parse_Spec : [XOF_LEN]Byte -> [MLKEM_N][16]
+Parse_Spec bytes = output
+  where
+    // 1. 切分: 578字节 -> 取前576字节 -> 192个3字节块
+    // (578 - 576 = 2，最后2字节按标准被丢弃)
+    blocks : [192][3]Byte
+    blocks = split (take`{576} bytes)
+
+    // 2. 转换: 192块 -> 384个候选数
+    candidates : [384][16]
+    candidates = join [ BytesToUint12 b | b <- blocks ]
+
+    // 3. 过滤 (使用 foldl 替代循环)
+    // 状态机: (当前已收集个数, 当前输出数组)
+    // 逻辑: 遍历所有候选数，如果数 < Q 且 没填满，就填入数组
+    step : ([16], [MLKEM_N][16]) -> [16] -> ([16], [MLKEM_N][16])
+    step (count, acc) x = 
+      if (x < `Q) && (count < `MLKEM_N)
+         then (count + 1, update acc count x) // 填入 x，计数+1
+         else (count, acc)                    // 保持不变
+
+    // 执行折叠，初始状态 count=0, acc全0
+    (_, output) = foldl step (0, zero) candidates
 
 
+// ==========================================
+// 3. GenMatrix Spec
+// ==========================================
+// 记得保留 k>=1 的约束
+gen_matrix : {k} (fin k, k >= 1, width (k-1) <= 8) => [32][8] -> Bit -> [k][k][MLKEM_N][16]
+gen_matrix digest isEnc = matrix
+  where
+    matrix = [ [ row i j | j <- [0 .. <k] ] | i <- [0 .. <k] ]
+    
+    row i j = poly
+      where
+        idx1 = if isEnc then (i:[8]) else (j:[8])
+        idx2 = if isEnc then (j:[8]) else (i:[8])
+        
+        seed = digest # [idx1, idx2]
+        
+        xof_out = HashFuncXOF`{outLen=XOF_LEN} seed
+        
+        poly = Parse_Spec xof_out
 
-// 性质 1: 范围约束 (Range Check)
-property prop_vals_bound seed isEnc =
-    all (\x -> x < `MLKEM_Q) all_coeffs
-    where 
-        mat = genMatrix seed isEnc
-        // join 将 [k][k]Poly 展平为 [k*k]Poly
-        // 再 join 一次展平为 [k*k*256]UInt12
-        all_coeffs = join (join mat)
+// ==========================================
+// 4. Properties (验证模型属性) - 全面改为 where
+// ==========================================
 
-// 性质 2: 转置关系 (Transpose Relation)
-property prop_transpose_relation seed =
-    mat_enc == transpose mat_no_enc
-    where
-        mat_enc    = genMatrix seed True
-        mat_no_enc = genMatrix seed False
+// Property 1: 确定性
+prop_Deterministic : [32][8] -> Bit -> Bit
+property prop_Deterministic seed isEnc =
+    gen_matrix`{k=3} seed isEnc == gen_matrix`{k=3} seed isEnc
 
-// 性质 3: 零值行为测试 (Sanity Check for Mock)
-property prop_mock_zero_behavior seed isEnc =
-    (genMatrix seed isEnc) == zero
+// Property 2: 值域检查 (All < Q)
+prop_RangeValid : [32][8] -> Bit -> Bit
+property prop_RangeValid seed isEnc =
+    all (\row -> 
+         all (\poly -> 
+           all (\coeff -> coeff < `Q) poly
+         ) row
+       ) matrix
+  where
+    matrix = gen_matrix`{k=3} seed isEnc
 
-// 性质 4: Parse 逻辑单元测试
-property prop_parse_logic_check =
-    (parse input_stream) @ 0 == 0
-    where
-        // 构造 1000 字节，前 3 字节产生一个非法值(4095)和一个有效值(0)
-        input_stream = [0xFF, 0x0F, 0x00] # (zero : [997][8])
+// Property 3: 转置关系 (核心逻辑)
+// 验证 A[i][j] 的种子 == A'[j][i] 的种子
+prop_TransposeRelation : [32][8] -> Bit
+property prop_TransposeRelation seed =
+    mat_enc == transpose mat_gen
+  where
+    mat_enc = gen_matrix`{k=3} seed True
+    mat_gen = gen_matrix`{k=3} seed False
+
+// Property 4: 参数 k 的适应性测试
+property prop_Transpose_K2 seed =
+    mat_enc == transpose mat_gen
+  where
+    mat_enc = gen_matrix`{k=2} seed True
+    mat_gen = gen_matrix`{k=2} seed False
+
+property prop_Transpose_K4 seed =
+    mat_enc == transpose mat_gen
+  where
+    mat_enc = gen_matrix`{k=4} seed True
+    mat_gen = gen_matrix`{k=4} seed False

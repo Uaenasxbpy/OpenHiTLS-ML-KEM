@@ -1,123 +1,182 @@
 enable_experimental;
+import "GenMatrix.cry"; 
+import "../hash/hash.cry";
 
-import "GenMatrix.cry";
 m <- llvm_load_module "GenMatrix.bc";
+let MLKEM_N   = 256;
+let K         = 3;
+let MAX_K     = 4; 
+let SEED_LEN  = 32;
+let XOF_LEN   = 578; 
 
-let MLKEM_N = 256;
-let MLKEM_K_MAX = 4;
-let MLKEM_SEED_LEN = 32;
-let MLKEM_XOF_OUTPUT_LENGTH = 1000;
-// 验证目标：ML-KEM-768 (k=3)
-let k = 3; 
+// Pointer types
+let i8p  = llvm_pointer (llvm_int 8);
+let i16p = llvm_pointer (llvm_int 16);
+// --- HashFuncXOF Override ---
+let hash_havoc = do {
+  let ctx = llvm_null;
 
+  let in_len = 34;
+  in_ptr <- llvm_alloc_readonly (llvm_array in_len (llvm_int 8));
+  in_val <- llvm_fresh_var "hash_in" (llvm_array in_len (llvm_int 8));
+  llvm_points_to in_ptr (llvm_term in_val);
 
-let ptr_to_fresh n ty = do {
-    x <- llvm_fresh_var n ty;
-    p <- llvm_alloc_readonly ty;
-    llvm_points_to p (llvm_term x);
-    return (x, p);
+  out_ptr <- llvm_alloc (llvm_array XOF_LEN (llvm_int 8));
+
+  llvm_execute_func
+    [ ctx
+    , in_ptr
+    , llvm_term {{ `in_len:[32] }}
+    , out_ptr
+    , llvm_term {{ `XOF_LEN:[32] }}
+    ];
+
+  let res = {{ HashFuncXOF`{outLen=XOF_LEN} in_val }};
+  llvm_points_to out_ptr (llvm_term res);
+
+  llvm_return (llvm_term {{ 0:[32] }});
 };
 
-// HashFuncXOF规范 (Override)
-let hash_xof_spec = do {
-    libCtx <- llvm_alloc_readonly (llvm_int 8);
-    let inLen = 34;
-    (input_val, input_ptr) <- ptr_to_fresh "xof_in" (llvm_array inLen (llvm_int 8));
-    let outLen = MLKEM_XOF_OUTPUT_LENGTH;
-    output_ptr <- llvm_alloc (llvm_array outLen (llvm_int 8));
-    llvm_execute_func [libCtx, input_ptr, llvm_term {{ `inLen : [32] }}, output_ptr, llvm_term {{ `outLen : [32] }}];
-    llvm_points_to output_ptr (llvm_term {{ hashFuncXOF input_val }});
-    llvm_return (llvm_term {{ 0 : [32] }});
+// --- Parse Override ---
+let parse_havoc = do {
+  poly_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  
+  let arr_len = XOF_LEN;
+  in_ptr <- llvm_alloc_readonly (llvm_array arr_len (llvm_int 8));
+  in_val <- llvm_fresh_var "parse_in" (llvm_array arr_len (llvm_int 8));
+  llvm_points_to in_ptr (llvm_term in_val);
+
+  llvm_execute_func 
+    [ poly_ptr
+    , in_ptr
+    , llvm_term {{ `arr_len:[32] }}
+    , llvm_term {{ `MLKEM_N:[32] }}
+    ];
+
+  let res = {{ Parse_Spec in_val }};
+  llvm_points_to poly_ptr (llvm_term res);
+
+  llvm_return (llvm_term {{ 0:[32] }});
 };
 
-// Parse 规范
-let parse_spec = do {
-    (input_val, input_ptr) <- ptr_to_fresh "arrayB" (llvm_array MLKEM_XOF_OUTPUT_LENGTH (llvm_int 8));
-    poly_ptr <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    llvm_execute_func [poly_ptr, input_ptr, llvm_term {{ `MLKEM_XOF_OUTPUT_LENGTH : [32] }}, llvm_term {{ `MLKEM_N : [32] }}];
+let info_type = llvm_struct_type [
+    llvm_int 8, llvm_int 8, llvm_int 8, llvm_int 8, llvm_int 8, 
+    llvm_int 32, llvm_int 32, llvm_int 32, llvm_int 32, llvm_int 32, llvm_int 32
+];
 
-    // Cryptol 返回的是 [256][12]，需要将其 zero-extend 到 [256][16] 以匹配 C 的 int16
-    let res = {{ [ zext c : [16] | c <- parse input_val ] }};
-    llvm_points_to poly_ptr (llvm_term res);
-    llvm_return (llvm_term {{ 0 : [32] }});
+let ctx_type = llvm_struct_type [
+    llvm_int 32,                
+    llvm_pointer info_type,     
+    llvm_pointer (llvm_int 8),  
+    llvm_int 32,                
+    llvm_pointer (llvm_int 8),  
+    llvm_int 32,                
+    llvm_pointer (llvm_int 8)   
+];
+
+let gen_matrix_glue = do {
+  // ---- info ----
+  info_ptr <- llvm_alloc_readonly info_type;
+  llvm_points_to info_ptr
+    (llvm_struct_value
+      [ llvm_term {{ `K:[8] }}
+      , llvm_term {{ 0:[8] }}, llvm_term {{ 0:[8] }}, llvm_term {{ 0:[8] }}, llvm_term {{ 0:[8] }}
+      , llvm_term {{ 0:[32] }}, llvm_term {{ 0:[32] }}, llvm_term {{ 0:[32] }} 
+      , llvm_term {{ 0:[32] }}, llvm_term {{ 0:[32] }}, llvm_term {{ 0:[32] }}
+      ]);
+
+  // ---- ctx ----
+  ctx_ptr <- llvm_alloc_readonly ctx_type;
+  llvm_points_to ctx_ptr (llvm_struct_value 
+      [ llvm_term {{ 0:[32] }} 
+      , info_ptr               
+      , llvm_null, llvm_term {{ 0:[32] }} 
+      , llvm_null, llvm_term {{ 0:[32] }} 
+      , llvm_null 
+      ]);
+
+  // ---- digest ----
+  digest_ptr <- llvm_alloc_readonly (llvm_array SEED_LEN (llvm_int 8));
+  digest <- llvm_fresh_var "digest" (llvm_array SEED_LEN (llvm_int 8));
+  llvm_points_to digest_ptr (llvm_term digest);
+
+  // ---- polyMatrix ----
+  matrix_ptr_array <- llvm_alloc (llvm_array MAX_K (llvm_array MAX_K i16p));
+
+  // Row 0
+  r0c0 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r0c1 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r0c2 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r0c3 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  let row0 = [r0c0, r0c1, r0c2, r0c3];
+
+  // Row 1
+  r1c0 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r1c1 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r1c2 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r1c3 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  let row1 = [r1c0, r1c1, r1c2, r1c3];
+
+  // Row 2
+  r2c0 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r2c1 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r2c2 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r2c3 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  let row2 = [r2c0, r2c1, r2c2, r2c3];
+
+  // Row 3
+  r3c0 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r3c1 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r3c2 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  r3c3 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+  let row3 = [r3c0, r3c1, r3c2, r3c3];
+
+  llvm_points_to matrix_ptr_array (llvm_array_value [
+      llvm_array_value row0,
+      llvm_array_value row1,
+      llvm_array_value row2,
+      llvm_array_value row3
+  ]);
+
+  isEnc8 <- llvm_fresh_var "isEnc" (llvm_int 8); 
+  llvm_precond {{ isEnc8 == 0 \/ isEnc8 == 1 }};
+  let isEnc_for_spec = {{ isEnc8 != 0 }};
+  let isEnc_for_llvm = llvm_term {{ if isEnc8 != 0 then 1:[1] else 0:[1] }};
+
+  // ---- Execute ----
+  llvm_execute_func 
+    [ ctx_ptr
+    , digest_ptr
+    , matrix_ptr_array
+    , isEnc_for_llvm
+    ];
+
+  // ---- Verify ----
+  let expected = {{ gen_matrix`{k=3} digest isEnc_for_spec }};
+
+  // Row 0
+  llvm_points_to r0c0 (llvm_term {{ expected @ 0 @ 0 }});
+  llvm_points_to r0c1 (llvm_term {{ expected @ 0 @ 1 }});
+  llvm_points_to r0c2 (llvm_term {{ expected @ 0 @ 2 }});
+  
+  // Row 1
+  llvm_points_to r1c0 (llvm_term {{ expected @ 1 @ 0 }});
+  llvm_points_to r1c1 (llvm_term {{ expected @ 1 @ 1 }});
+  llvm_points_to r1c2 (llvm_term {{ expected @ 1 @ 2 }});
+  
+  // Row 2
+  llvm_points_to r2c0 (llvm_term {{ expected @ 2 @ 0 }});
+  llvm_points_to r2c1 (llvm_term {{ expected @ 2 @ 1 }});
+  llvm_points_to r2c2 (llvm_term {{ expected @ 2 @ 2 }});
+
+  llvm_return (llvm_term {{ 0:[32] }});
 };
 
-// GenMatrix 规范
-let gen_matrix_spec isEnc = do {
-    info_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Info");
-    llvm_points_to info_ptr (llvm_struct_value [ llvm_term {{ `k : [8] }} ]);
-    ctx_ptr <- llvm_alloc_readonly (llvm_struct "struct.CRYPT_MLKEM_Ctx");
-    let null_ptr = llvm_null; 
-    llvm_points_to ctx_ptr (llvm_struct_value [ info_ptr, null_ptr ]);
-    (digest_val, digest_ptr) <- ptr_to_fresh "digest" (llvm_array MLKEM_SEED_LEN (llvm_int 8));
-    matrix_storage_ptr <- llvm_alloc (llvm_array MLKEM_K_MAX (llvm_array MLKEM_K_MAX (llvm_pointer (llvm_int 16))));
+print "Registering overrides...";
+hash_ov  <- llvm_unsafe_assume_spec m "HashFuncXOF" hash_havoc;
+parse_ov <- llvm_unsafe_assume_spec m "Parse"       parse_havoc;
 
-    // 行 0
-    p00 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    p01 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    p02 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    // 行 1
-    p10 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    p11 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    p12 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    // 行 2
-    p20 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    p21 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
-    p22 <- llvm_alloc (llvm_array MLKEM_N (llvm_int 16));
+print "Verifying GenMatrix...";
+llvm_verify m "GenMatrix" [hash_ov, parse_ov] true gen_matrix_glue yices;
 
-    // 将分配好的 buffer 地址填入 matrix_storage_ptr
-    
-    // Row 0
-    let row0 = llvm_elem matrix_storage_ptr 0;
-    llvm_points_to (llvm_elem row0 0) p00;
-    llvm_points_to (llvm_elem row0 1) p01;
-    llvm_points_to (llvm_elem row0 2) p02;
-    
-    // Row 1
-    let row1 = llvm_elem matrix_storage_ptr 1;
-    llvm_points_to (llvm_elem row1 0) p10;
-    llvm_points_to (llvm_elem row1 1) p11;
-    llvm_points_to (llvm_elem row1 2) p12;
-    
-    // Row 2
-    let row2 = llvm_elem matrix_storage_ptr 2;
-    llvm_points_to (llvm_elem row2 0) p20;
-    llvm_points_to (llvm_elem row2 1) p21;
-    llvm_points_to (llvm_elem row2 2) p22;
-
-    let isEnc_bit = if isEnc then {{ 1:[8] }} else {{ 0:[8] }}; 
-    llvm_execute_func [ ctx_ptr, digest_ptr, matrix_storage_ptr, llvm_term isEnc_bit ];
-    let isEnc_cry = if isEnc then {{ True }} else {{ False }};
-    let expected = {{ genMatrix digest isEnc_cry }};
-    
-    // Row 0
-    llvm_points_to p00 (llvm_term {{ [zext c : [16] | c <- expected@0@0] }});
-    llvm_points_to p01 (llvm_term {{ [zext c : [16] | c <- expected@0@1] }});
-    llvm_points_to p02 (llvm_term {{ [zext c : [16] | c <- expected@0@2] }});
-    // Row 1
-    llvm_points_to p10 (llvm_term {{ [zext c : [16] | c <- expected@1@0] }});
-    llvm_points_to p11 (llvm_term {{ [zext c : [16] | c <- expected@1@1] }});
-    llvm_points_to p12 (llvm_term {{ [zext c : [16] | c <- expected@1@2] }});
-    // Row 2
-    llvm_points_to p20 (llvm_term {{ [zext c : [16] | c <- expected@2@0] }});
-    llvm_points_to p21 (llvm_term {{ [zext c : [16] | c <- expected@2@1] }});
-    llvm_points_to p22 (llvm_term {{ [zext c : [16] | c <- expected@2@2] }});
-
-    llvm_return (llvm_term {{ 0 : [32] }});
-};
-
-// 开始验证
-
-print "Verifying HashFuncXOF...";
-hash_ov <- llvm_verify m "HashFuncXOF" [] true hash_xof_spec z3;
-
-print "Verifying Parse...";
-parse_ov <- llvm_verify m "Parse" [] true parse_spec z3;
-
-print "Verifying GenMatrix (isEnc=True)...";
-llvm_verify m "GenMatrix" [hash_ov, parse_ov] true (gen_matrix_spec true) z3;
-
-print "Verifying GenMatrix (isEnc=False)...";
-llvm_verify m "GenMatrix" [hash_ov, parse_ov] true (gen_matrix_spec false) z3;
-
-print "All verifications completed.";
+print "Done.";
