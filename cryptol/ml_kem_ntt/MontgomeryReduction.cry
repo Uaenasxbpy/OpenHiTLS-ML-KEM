@@ -1,4 +1,4 @@
-module MontgomeryReduction where
+module ml_kem_ntt::MontgomeryReduction where
 
 // 原函数功能是：相当于模运算，只不过使用了Montgomery Reduction 技术
 // 定义常量

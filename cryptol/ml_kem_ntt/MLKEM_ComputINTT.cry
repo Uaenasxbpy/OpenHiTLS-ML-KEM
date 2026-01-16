@@ -1,8 +1,8 @@
-module MLKEM_ComputINTT where
+module ml_kem_ntt::MLKEM_ComputINTT where
 
 // 复用已有的两个模块
-import MontgomeryReduction as MR
-import BarrettReduction   as BR
+import ml_kem_ntt::MontgomeryReduction as MR
+import ml_kem_ntt::BarrettReduction   as BR
 
 // -----------------------------
 // 常量（类型级）

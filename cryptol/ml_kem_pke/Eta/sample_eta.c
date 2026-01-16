@@ -75,4 +75,4 @@ int32_t SampleEta2(const CRYPT_ML_KEM_Ctx *ctx, uint8_t *digest, int16_t *polyS[
     return CRYPT_SUCCESS;
 }
 
-// scp -r "F:\研1\PQC算法验证与优化\Kyber一致性验证\OpenHiTLS-ML-KEM\cryptol\ml_kem_pke\Eta" paper207@10.122.200.71:/home/paper207/Downloads/xiongbing/cryptol/OpenHiTLS/
+// scp -r "F:\研1\PQC算法验证与优化\Kyber一致性验证\OpenHiTLS-ML-KEM" paper207@10.122.200.71:/home/paper207/Downloads/xiongbing/cryptol/

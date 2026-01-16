@@ -1,4 +1,4 @@
-module mlkem_compress where
+module ml_kem_pke::ml_compress::ml_compress where
 
 // -----------------------------------------------------------------------------
 // 常量定义

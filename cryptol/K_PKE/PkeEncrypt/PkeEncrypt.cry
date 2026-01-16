@@ -1,0 +1,93 @@
+module MLKEM_Encrypt where
+import ml_kem_pke::Eta::SampleEta             // 采样 s, e
+import ml_kem_poly::ml_kem_poly               // 矩阵乘法
+import ml_kem_ntt::MLKEM_ComputINTT           // 逆变换
+import ml_kem_pke::En_Decode::Encode_Decode   // 编解码
+import ml_kem_pke::ml_compress::ml_compress   // 压缩
+
+type MLKEM_N = 256
+type Byte = [8]
+type K = 3 
+type DU = 10
+type DV = 4
+
+type CT_LEN = (320 * K) + 128
+
+to_10bit : [MLKEM_N][16] -> [MLKEM_N][10]
+to_10bit poly = [ (drop c) : [10] | c <- poly ]
+
+to_4bit : [MLKEM_N][16] -> [MLKEM_N][4]
+to_4bit poly = [ (drop c) : [4] | c <- poly ]
+
+PkeEncrypt : [K][K][MLKEM_N][16] -> 
+             [K][MLKEM_N][16] -> 
+             [32]Byte -> 
+             [32]Byte -> 
+             [128][16] -> 
+             [129][16] -> 
+             [128][16] -> 
+             [CT_LEN]Byte
+
+PkeEncrypt matrixA vectorT m r zetas_inv psi zetas = ct
+  where
+    
+    // Step 9-12: Sample y (nonce: 0 .. K-1)
+    vectorY = sample_eta1_real_prf r 0 psi
+    // Step 13-16: Sample e1 (nonce: K .. 2K-1)
+    vectorE1 = sample_eta2_real_prf r (`K : [8]) 
+    // Step 17: Sample e2 (nonce: 2K)
+    polyE2 = (sample_eta2_real_prf r (`(2*K) : [8])) @ 0     
+    // Step 18: u = A^T * y  (NTT Domain)     
+    vectorZero = zero : [K][MLKEM_N][16]
+    vectorU_ntt = matrixTransposeMulAdd`{k=K} matrixA vectorY vectorZero zetas     
+    // Step 19: u = Compress_du(INTT(u) + e1)     
+    
+    // 1. INTT(u)
+    vectorU_poly = [ mlkem_computINTT p zetas_inv | p <- vectorU_ntt ]
+    
+    // 2. Add e1 & Compress
+    vectorU_compressed = 
+        [ [ compress (u + e) 10 | u <- u_poly | e <- e1_poly ] 
+        | u_poly <- vectorU_poly 
+        | e1_poly <- vectorE1 
+        ]
+     
+    // Step 21: v = t^T * y (NTT Domain)
+     
+    polyZero = zero : [MLKEM_N][16]
+    polyV_ntt = vectorInnerProductAdd`{k=K} vectorT vectorY polyZero zetas
+     
+    // Step 20 & 22: v = Compress_dv( INTT(v) + e2 + Decompress(m) )    
+
+    // 1. INTT(v)
+    polyV_poly = mlkem_computINTT polyV_ntt zetas_inv
+
+    // 2. 处理消息 m
+    m_bits = DecodeBits1 m
+    
+    // Decompress(m, 1)
+    polyM_scaled = [ decompress (zext b) 1 | b <- m_bits ]
+
+    // 3. Add & Compress
+    polyV_compressed = 
+        [ compress (v + e + m_val) 4
+        | v <- polyV_poly 
+        | e <- polyE2
+        | m_val <- polyM_scaled
+        ]
+
+     
+    // Step 22-23: Encode Ciphertext   
+    // ct[0..320*K]: EncodeBits10(u)
+    ct_u = join [ EncodeBits10 (to_10bit poly) | poly <- vectorU_compressed ]
+
+    // ct[...]: EncodeBits4(v)
+    ct_v = EncodeBits4 (to_4bit polyV_compressed)
+
+    ct = ct_u # ct_v
+
+property prop_Encrypt_Deterministic mA vT m r zi psi z =
+    ct1 == ct2
+    where
+       ct1 = PkeEncrypt mA vT m r zi psi z
+       ct2 = PkeEncrypt mA vT m r zi psi z
