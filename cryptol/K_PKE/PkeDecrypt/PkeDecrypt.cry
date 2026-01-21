@@ -1,0 +1,104 @@
+module K_PKE::PkeDecrypt::PkeDecrypt where
+
+// ==========================================
+// 1. 导入依赖
+// ==========================================
+import ml_kem_pke::En_Decode::Encode_Decode   // 编解码
+import ml_kem_pke::ml_compress::ml_compress   // 压缩/解压
+import ml_kem_ntt::MLKEM_ComputINTT           // INTT
+import ml_kem_pke::Eta::MLKEM_ComputNTT       // NTT
+import ml_kem_poly::ml_kem_poly               // 向量内积
+
+// ==========================================
+// 2. 常量定义 (ML-KEM-768)
+// ==========================================
+type MLKEM_N = 256
+type Byte = [8]
+type K = 3 
+type DU = 10
+type DV = 4
+
+// 密文长度
+type CT_LEN = (320 * K) + 128
+
+// ==========================================
+// 3. PkeDecrypt 核心逻辑
+// ==========================================
+
+PkeDecrypt : [K][MLKEM_N][16] -> 
+             [CT_LEN]Byte -> 
+             [128][16] -> 
+             [129][16] -> 
+             [128][16] -> 
+             [32]Byte
+
+PkeDecrypt vectorS ct zetas_inv psi zetas = m_bytes
+  where
+    // --------------------------------------------------------
+    // 1. 拆分密文
+    // --------------------------------------------------------
+    ct_u_bytes : [320 * K]Byte
+    ct_u_bytes = take`{320 * K} ct
+
+    ct_v_bytes : [128]Byte
+    ct_v_bytes = drop`{320 * K} ct
+
+    // --------------------------------------------------------
+    // 2. Decode & Decompress u (c1)
+    // --------------------------------------------------------
+    u_chunks = split ct_u_bytes
+
+    // [FIXED] 移除了不支持的中间绑定语法，直接内联
+    vectorU_poly = 
+        [ [ decompress (zext c) 10 | c <- DecodeBits10 chunk ]
+        | chunk <- u_chunks
+        ]
+
+    // --------------------------------------------------------
+    // 3. Decode & Decompress v (c2)
+    // --------------------------------------------------------
+    polyV_poly = 
+        [ decompress (zext c) 4 | c <- DecodeBits4 ct_v_bytes ]
+
+    // --------------------------------------------------------
+    // 4. NTT(u) -> u_hat (NTT Domain)
+    // --------------------------------------------------------
+    vectorU_ntt = [ mlkem_computNTT p psi | p <- vectorU_poly ]
+
+    // --------------------------------------------------------
+    // 5. Inner Product: s^T * u_hat
+    // --------------------------------------------------------
+    polyZero = zero : [MLKEM_N][16]
+    poly_su_ntt = vectorInnerProductAdd`{k=K} vectorS vectorU_ntt polyZero zetas
+
+    // --------------------------------------------------------
+    // 6. INTT: -> s^T * u (Poly Domain)
+    // --------------------------------------------------------
+    poly_su_poly = mlkem_computINTT poly_su_ntt zetas_inv
+
+    // --------------------------------------------------------
+    // 7. Subtract & Compress
+    // --------------------------------------------------------
+    poly_diff = polyV_poly - poly_su_poly
+
+    // [FIXED] 移除了不支持的中间绑定语法，直接内联 compress 调用
+    m_poly_bits = 
+        [ (drop (compress c 1)) : [1] 
+        | c <- poly_diff
+        ]
+
+    // --------------------------------------------------------
+    // 8. Encode Message
+    // --------------------------------------------------------
+    m_bytes = EncodeBits1 m_poly_bits
+
+
+// ==========================================
+// 属性验证
+// ==========================================
+
+property prop_Decrypt_Deterministic s ct zi psi z =
+    m1 == m2
+    where
+        m1 = PkeDecrypt s ct zi psi z
+        m2 = PkeDecrypt s ct zi psi z

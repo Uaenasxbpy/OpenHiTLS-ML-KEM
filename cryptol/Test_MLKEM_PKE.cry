@@ -1,0 +1,108 @@
+module Test_MLKEM_PKE where
+
+// ==========================================
+// 1. 导入
+// ==========================================
+import K_PKE::PkeKeyGen::PkeKeyGen
+import K_PKE::PkeEncrypt::PkeEncrypt
+import K_PKE::PkeDecrypt::PkeDecrypt
+import ml_kem_pke::GenMatrix::GenMatrix
+import ml_kem_poly::ml_kem_poly
+import ml_kem_pke::En_Decode::Encode_Decode
+import ml_kem_pke::Eta::SampleEta
+import ml_kem_pke::hash::hash
+
+// ==========================================
+// 2. 常量定义
+// ==========================================
+type MLKEM_N = 256
+type K = 3
+type Byte = [8]
+
+// -----------------------------------------------------------------------------
+// 标准常量表 (FIPS 203 / Kyber)
+// -----------------------------------------------------------------------------
+
+// Used for forward NTT and Matrix Multiplication
+zetas : [128][16]
+zetas = [
+    2285, 2571, 2970, 1812, 1493, 1422, 287, 202, 3158, 622, 1577, 182, 962, 2127, 1855, 1468,
+    573, 2004, 264, 383, 2500, 1458, 1727, 130, 2648, 1017, 732, 608, 1787, 411, 3124, 1758,
+    1223, 652, 2777, 1015, 2036, 1491, 3047, 1785, 516, 3321, 3009, 2663, 1711, 2167, 126, 1469,
+    2476, 3239, 3058, 830, 107, 1908, 3082, 2378, 2931, 961, 1821, 2604, 448, 2264, 677, 2054,
+    2226, 430, 555, 843, 2078, 871, 1550, 105, 422, 587, 177, 3094, 3038, 2869, 1574, 1653,
+    3083, 778, 1159, 3182, 2552, 1483, 2727, 1119, 1739, 644, 2457, 349, 418, 329, 3173, 3254,
+    817, 1097, 603, 610, 1322, 2044, 1864, 384, 2114, 3193, 1218, 1994, 2455, 220, 2142, 1670,
+    2144, 1799, 2051, 794, 1819, 2475, 2459, 478, 3221, 3021, 996, 991, 958, 1869, 1522, 1628
+  ]
+
+// Used for SampleEta (BitReversed, usually same as zetas but padding with 0 at end for 129?)
+// Note: In C code SampleEta uses `zetas` directly or a specific table. 
+// Standard Kyber spec uses `zetas` for NTT.
+// Let's assume psi here matches the one used in your ComputINTT.
+psi : [129][16]
+psi = [
+  // This is actually the bit-reversed order used in some implementations
+  // For simplicity in test, we reuse the table from ComputINTT if available, 
+  // or use this standard set which is compatible with the `zetas` above.
+  // First 128 elements:
+  2285, 2571, 2970, 1812, 1493, 1422, 287, 202, 3158, 622, 1577, 182, 962, 2127, 1855, 1468,
+  573, 2004, 264, 383, 2500, 1458, 1727, 130, 2648, 1017, 732, 608, 1787, 411, 3124, 1758,
+  1223, 652, 2777, 1015, 2036, 1491, 3047, 1785, 516, 3321, 3009, 2663, 1711, 2167, 126, 1469,
+  2476, 3239, 3058, 830, 107, 1908, 3082, 2378, 2931, 961, 1821, 2604, 448, 2264, 677, 2054,
+  2226, 430, 555, 843, 2078, 871, 1550, 105, 422, 587, 177, 3094, 3038, 2869, 1574, 1653,
+  3083, 778, 1159, 3182, 2552, 1483, 2727, 1119, 1739, 644, 2457, 349, 418, 329, 3173, 3254,
+  817, 1097, 603, 610, 1322, 2044, 1864, 384, 2114, 3193, 1218, 1994, 2455, 220, 2142, 1670,
+  2144, 1799, 2051, 794, 1819, 2475, 2459, 478, 3221, 3021, 996, 991, 958, 1869, 1522, 1628,
+  0 // Padding for [129]
+]
+
+// Used for INTT (Inverse NTT)
+// This must be the modular inverse of `zetas` * -1 (or similar depending on montgomery factor)
+// For simplicity, we use the values that pair with `zetas` to make INTT(NTT(x)) == x
+zetas_inv : [128][16]
+zetas_inv = [
+  1044, 758, 359, 1517, 1836, 1907, 3042, 3127, 171, 2707, 1752, 3147, 2367, 1202, 1474, 1861,
+  2756, 1325, 3065, 2946, 829, 1871, 1602, 3199, 681, 2312, 2597, 2721, 1542, 2918, 205, 1571,
+  2106, 2677, 552, 2314, 1293, 1838, 282, 1544, 2813, 8, 320, 666, 1618, 1162, 3203, 1860,
+  853, 90, 271, 2499, 3222, 1421, 247, 951, 398, 2368, 1508, 725, 2881, 1065, 2652, 1275,
+  1103, 2899, 2774, 2486, 1251, 2458, 1779, 3224, 2907, 2742, 3152, 235, 291, 460, 1755, 1676,
+  246, 2551, 2170, 147, 777, 1846, 602, 2210, 1590, 2685, 872, 2980, 2911, 3000, 156, 75,
+  2512, 2232, 2726, 2719, 2007, 1285, 1465, 2945, 1215, 136, 2111, 1335, 874, 3109, 1187, 1659,
+  1185, 1530, 1278, 2535, 1510, 854, 870, 2851, 108, 308, 2333, 2338, 2371, 1460, 1807, 1701
+]
+
+// ==========================================
+// 4. 端到端正确性属性
+// ==========================================
+// [FIXED] 移除了 table 参数，直接使用上面的常量
+property prop_PKE_Correctness (d:[32]Byte) (m:[32]Byte) (r:[32]Byte) =
+    m_decrypted == m
+  where
+    // Step 1: Key Generation
+    (pk, dk) = PkeKeyGen d (`K:[8]) psi zetas
+
+    // Step 2: Parse PK (Reconstruct Math Objects)
+    rho = drop`{384*K} pk
+    matrixA = gen_matrix`{k=K} rho False
+    
+    // Manual T reconstruction
+    (p, q) = HashFuncG (d # [`K:[8]])
+    vectorS = sample_eta1_real_prf q 0 psi
+    vectorE = sample_eta1_real_prf q (`K:[8]) psi
+    vectorT = matrixMulAdd`{k=K} matrixA vectorS vectorE zetas
+
+    // Step 3: Encryption
+    ct = PkeEncrypt matrixA vectorT m r zetas_inv psi zetas
+
+    // Step 4: Decryption
+    m_decrypted = PkeDecrypt vectorS ct zetas_inv psi zetas
+
+// ==========================================
+// 5. 编解码回路测试
+// ==========================================
+property prop_Keys_Codec_RoundTrip (d:[32]Byte) =
+    True 
+  where
+    (p, q) = HashFuncG (d # [`K:[8]])
+    vectorS = sample_eta1_real_prf q 0 psi

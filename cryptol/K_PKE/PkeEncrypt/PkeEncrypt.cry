@@ -1,4 +1,4 @@
-module MLKEM_Encrypt where
+module K_PKE::PkeEncrypt::PkeEncrypt where
 import ml_kem_pke::Eta::SampleEta             // 采样 s, e
 import ml_kem_poly::ml_kem_poly               // 矩阵乘法
 import ml_kem_ntt::MLKEM_ComputINTT           // 逆变换
