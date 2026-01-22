@@ -1,0 +1,78 @@
+module ML_KEM::MLKEM_DecapsInternal::MLKEM_DecapsInternal where
+
+import K_PKE::PkeDecrypt::PkeDecrypt  // 解密
+import K_PKE::PkeEncrypt::PkeEncrypt  // 重新加密
+import ml_kem_pke::hash::hash         // H, G, J
+
+type MLKEM_N = 256
+type K = 3
+type Byte = [8]
+
+// 长度定义
+type EK_LEN = 384 * K + 32  // 1184
+type CT_LEN = 320 * K + 128 // 1088
+type SHARED_KEY_LEN = 32
+type Z_LEN = 32
+type H_LEN = 32
+
+// 输入:
+//   vectorS: 私钥向量 (用于 PkeDecrypt)
+//   matrixA: 公钥矩阵 (用于 PkeEncrypt)
+//   vectorT: 公钥向量 (用于 PkeEncrypt)
+//   ek_bytes: 公钥字节串 (用于验证 H(ek))
+//   z:       隐式拒绝用的随机数
+//   h:       预存的 H(ek)
+//   ct:      接收到的密文
+//   psi, zetas, inv: NTT 表
+// 输出:
+//   sk: 共享密钥
+
+MLKEM_DecapsInternal : 
+    [K][MLKEM_N][16] ->       // vectorS (from dk)
+    [K][K][MLKEM_N][16] ->    // matrixA (from ek)
+    [K][MLKEM_N][16] ->       // vectorT (from ek)
+    [EK_LEN]Byte ->           // ek_bytes
+    [Z_LEN]Byte ->            // z
+    [H_LEN]Byte ->            // h (from dk)
+    [CT_LEN]Byte ->           // ct (input ciphertext)
+    [128][16] ->              // zetas_inv
+    [129][16] ->              // psi
+    [128][16] ->              // zetas
+    [SHARED_KEY_LEN]Byte
+
+MLKEM_DecapsInternal vectorS matrixA vectorT ek_bytes z h ct zetas_inv psi zetas = sk_final
+  where
+     
+    // 1. Verify H(ek) (Optional but good for correctness check)
+    // In C code, it returns error if H(ek) != h.
+    // In Cryptol, we assume valid key structure, or we could assert it.
+    // h_recalc = HashFuncH ek_bytes
+    // We proceed assuming h is correct.
+
+     
+    // 2. m' = K-PKE.Decrypt(dk, c)     
+    m_prime = PkeDecrypt vectorS ct zetas_inv psi zetas
+
+     
+    // 3. (K', r') = G(m' || h)     
+    // mhek = m' # h
+    (k_prime, r_prime) = HashFuncG (m_prime # h)
+
+     
+    // 4. c' = K-PKE.Encrypt(ek, m', r')     
+    ct_recalc = PkeEncrypt matrixA vectorT m_prime r_prime zetas_inv psi zetas
+
+    // 5. Implicit Rejection    
+    // if c == c' then K = K'
+    // else K = J(z || c)    
+    k_random = HashFuncJ (z # ct)    
+    sk_final = if ct == ct_recalc
+               then k_prime
+               else k_random
+
+
+property prop_Decaps_Deterministic vS mA vT ek z h ct zi psi ze =
+    sk1 == sk2
+  where
+    sk1 = MLKEM_DecapsInternal vS mA vT ek z h ct zi psi ze
+    sk2 = MLKEM_DecapsInternal vS mA vT ek z h ct zi psi ze

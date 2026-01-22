@@ -1,0 +1,47 @@
+module ML_KEM::MLKEM_KeyGenInternal::MLKEM_KeyGenInternal where
+
+import K_PKE::PkeKeyGen::PkeKeyGen
+import ml_kem_pke::hash::hash
+
+// 常量定义 (ML-KEM-768)
+type K = 3
+type Byte = [8]
+type EK_LEN = 384 * K + 32
+type DK_PKE_LEN = 384 * K
+type H_LEN = 32
+type Z_LEN = 32
+
+type DK_LEN = DK_PKE_LEN + EK_LEN + H_LEN + Z_LEN
+
+// 输入:
+//   d: 随机种子 (for K-PKE)
+//   z: 随机种子 (for implicit rejection)
+//   psi, zetas: NTT 表
+// 输出:
+//   (ek, dk)
+MLKEM_KeyGenInternal : [32]Byte -> 
+                       [32]Byte -> 
+                       [129][16] -> 
+                       [128][16] -> 
+                       ([EK_LEN]Byte, [DK_LEN]Byte)
+
+MLKEM_KeyGenInternal d z psi zetas = (ek, dk_final)
+  where
+    // 1. 调用底层PkeKeyGen
+    // 注意: PkeKeyGen 的第二个参数 k_byte 需要是数值 `K
+    // PkeKeyGen 返回 (pk, dk) 即 (ek, dk_pke)
+    (ek, dk_pke) = PkeKeyGen d (`K:[8]) psi zetas
+
+    // 2. 计算H(ek)
+    // 使用导入的 HashFuncH (SHA3-256)
+    h_ek = HashFuncH ek
+
+    // 3. 组装最终私钥dk
+    // dk = dk_pke || ek || H(ek) || z
+    dk_final = dk_pke # ek # h_ek # z
+
+property prop_MLKEM_KeyGen_Deterministic d z psi zetas =
+    ek1 == ek2 /\ dk1 == dk2
+  where
+    (ek1, dk1) = MLKEM_KeyGenInternal d z psi zetas
+    (ek2, dk2) = MLKEM_KeyGenInternal d z psi zetas

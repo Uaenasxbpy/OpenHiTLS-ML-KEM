@@ -1,0 +1,55 @@
+module ML_KEM::MLKEM_EncapsInternal::MLKEM_EncapsInternal where
+import K_PKE::PkeEncrypt::PkeEncrypt 
+import ml_kem_pke::hash::hash        
+
+type MLKEM_N = 256
+type K = 3
+type Byte = [8]
+
+type EK_LEN = 384 * K + 32  // 1184 bytes
+type CT_LEN = 320 * K + 128 // 1088 bytes
+type SHARED_KEY_LEN = 32
+
+// 输入:
+//   matrixA: 公钥矩阵 (用于 PkeEncrypt)
+//   vectorT: 公钥向量 (用于 PkeEncrypt)
+//   ek_bytes: 公钥字节串 (用于 HashFuncH)
+//   m:       随机消息 (32 bytes, 作为 seed 使用)
+//   psi, zetas, inv: NTT 表
+// 输出:
+//   (sk, ct): (共享密钥 K, 密文 c)
+
+MLKEM_EncapsInternal : 
+    [K][K][MLKEM_N][16] ->    // matrixA
+    [K][MLKEM_N][16] ->       // vectorT
+    [EK_LEN]Byte ->           // ek_bytes
+    [32]Byte ->               // m
+    [128][16] ->              // zetas_inv (for Encrypt)
+    [129][16] ->              // psi       (for Encrypt)
+    [128][16] ->              // zetas     (for Encrypt)
+    ([SHARED_KEY_LEN]Byte, [CT_LEN]Byte)
+
+MLKEM_EncapsInternal matrixA vectorT ek_bytes m zetas_inv psi zetas = (shared_K, ct)
+  where
+    // 对应 C: HashFuncH(..., ctx->ek, ...)
+    h_ek = HashFuncH ek_bytes
+
+    // 2. Compute (K, r) = G(m || H(ek))
+    // mhek = m # h_ek
+    // G returns two 32-byte values: (K, r)
+    // 对应 C: HashFuncG(..., mhek, ..., kr, ...)
+    (shared_K, r) = HashFuncG (m # h_ek)
+
+    // 3. c = K-PKE.Encrypt(ek, m, r)
+    // 对应 C: PkeEncrypt(ctx, ct, m, kr + 32)
+    // 注意: 这里使用的是从 G 派生出的 r，而不是输入的 m
+    // PkeEncrypt 使用 m 作为消息明文进行加密
+    ct = PkeEncrypt matrixA vectorT m r zetas_inv psi zetas
+
+// 4. 属性验证 (Sanity Check)
+
+property prop_Encaps_Deterministic mA vT ek m zi psi z =
+    sk1 == sk2 /\ ct1 == ct2
+  where
+    (sk1, ct1) = MLKEM_EncapsInternal mA vT ek m zi psi z
+    (sk2, ct2) = MLKEM_EncapsInternal mA vT ek m zi psi z
