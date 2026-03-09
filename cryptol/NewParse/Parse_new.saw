@@ -1,0 +1,56 @@
+/* Parse_new.saw */
+
+/* 分配一块 LLVM 内存，并用给定值初始化 */
+let alloc_init ty v = do {
+  p <- llvm_alloc ty;
+  llvm_points_to p v;
+  return p;
+};
+
+/* 加载新的 bitcode 模块 */
+m <- llvm_load_module "Parse_new.bc";
+
+/* 导入新的 Cryptol 规格 */
+import "Parse_new.cry";
+
+/* 固定实例验证：
+   int32_t Parse(uint16_t *polyNtt, const uint8_t *arrayB, uint32_t arrayLen, uint32_t n)
+   调用参数固定为：
+   - arrayLen = 578
+   - n        = 256
+*/
+let parse_new_spec_578_256 = do {
+  /* 符号输入：578 字节 */
+  bytes <- llvm_fresh_var "bytes" (llvm_array 578 (llvm_int 8));
+
+  /* 输出数组：256 个 uint16，初始全 0 */
+  poly_arr <- alloc_init (llvm_array 256 (llvm_int 16))
+                         (llvm_term {{ zero : [256][16] }});
+
+  /* 输入数组：578 个 uint8 */
+  bytes_arr <- alloc_init (llvm_array 578 (llvm_int 8))
+                          (llvm_term bytes);
+
+  /* 执行 C 函数 */
+  llvm_execute_func [
+    poly_arr,
+    bytes_arr,
+    llvm_term {{ 578 : [32] }},
+    llvm_term {{ 256 : [32] }}
+  ];
+
+  /* 输入数组只读，调用后保持不变 */
+  llvm_points_to bytes_arr (llvm_term bytes);
+
+  /* 用 Parse_new.cry 中的包装规格计算期望结果 */
+  let parse_result = {{ parseNew_578_256 bytes : ([32], [256][16]) }};
+
+  /* 检查输出数组 */
+  llvm_points_to poly_arr (llvm_term {{ parse_result.1 }});
+
+  /* 检查返回值 */
+  llvm_return (llvm_term {{ parse_result.0 }});
+};
+
+/* 验证 Parse */
+llvm_verify m "Parse" [] false parse_new_spec_578_256 z3;

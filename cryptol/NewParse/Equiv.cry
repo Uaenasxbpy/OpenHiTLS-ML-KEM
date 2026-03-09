@@ -1,0 +1,56 @@
+module Equiv where
+
+import Parse as Old
+import Parse_new as New
+
+type Byte   = [8]
+type Word16 = [16]
+type Word32 = [32]
+type Ret    = [32]
+type Poly n = [n]Word16
+
+/* helper 等价：d1 */
+prop_parseD1_equiv : [3]Byte -> Bit
+property prop_parseD1_equiv bs =
+  Old::parseD1 bs == New::parseD1 bs
+
+/* helper 等价：d2 */
+prop_parseD2_equiv : [3]Byte -> Bit
+property prop_parseD2_equiv bs =
+  Old::parseD2 bs == New::parseD2 bs
+
+/* 一般形式：对完整 3-byte chunk 输入证明等价 */
+prop_parse_equiv :
+  {chunks, outsz}
+  (fin chunks, fin outsz, 32 >= width outsz) =>
+  [3 * chunks]Byte -> Word32 -> Bit
+property prop_parse_equiv bytes n =
+  rOld == rNew
+  where
+    rOld : (Ret, Poly outsz)
+    rOld = Old::parse bytes n
+
+    rNew : (Ret, Poly outsz)
+    rNew = New::parseNew bytes n
+
+/* 小实例：6 字节输入，输出 4 个系数 */
+prop_parse_equiv_6_4 : [6]Byte -> Bit
+property prop_parse_equiv_6_4 bytes =
+  rOld == rNew
+  where
+    rOld : (Ret, [4][16])
+    rOld = Old::parse bytes (4 : [32])
+
+    rNew : (Ret, [4][16])
+    rNew = New::parseNew bytes (4 : [32])
+
+/* 固定实例：578 字节输入，输出 256 个系数 */
+prop_parse_equiv_578_256 : [578]Byte -> Bit
+property prop_parse_equiv_578_256 bytes =
+  rOld == rNew
+  where
+    rOld : (Ret, [256][16])
+    rOld = Old::parse_578_256 bytes
+
+    rNew : (Ret, [256][16])
+    rNew = New::parseNew_578_256 bytes

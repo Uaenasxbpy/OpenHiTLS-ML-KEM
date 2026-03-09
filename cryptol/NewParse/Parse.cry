@@ -1,0 +1,104 @@
+module Parse where
+
+type Byte   = [8]
+type Word16 = [16]
+type Ret    = [32]
+type Chunk  = [3]Byte
+type Poly n = [n]Word16
+type State n = ([32], Poly n)
+
+q : Word16
+q = 3329
+
+// 从3字节中解析第一个12位的系数
+parseD1 : Chunk -> Word16
+parseD1 [b0, b1, _] =
+  (zero # b0) + ((zero # (b1 % (16 : [8]))) << 8)
+
+// 从3字节中解析第二个12位的系数
+parseD2 : Chunk -> Word16
+parseD2 [_, b1, b2] =
+  ((zero # b1) >> 4) + ((zero # b2) << 4)
+
+
+/* 条件追加：
+   - 只有 j < need 时，才还有必要继续写
+   - 只有 j < outsz 时，索引 update 才安全
+   - 只有 d < q 时，这个值才会被接受并写入
+   返回更新后的 (j, poly)
+*/
+appendIfValid : {outsz} (fin outsz, 32 >= width outsz) => State outsz -> [32] -> Word16 -> State outsz
+appendIfValid (j, poly) need d =
+  if j < need
+  then if j < ((`outsz) : [32])
+       then if d < q
+            then (j + 1, update poly j d)
+            else (j, poly)
+       else (j, poly)
+  else (j, poly)
+
+
+/* 处理一个 chunk：
+   先解出 d1、d2，再依次尝试追加到输出数组中 */
+step : {outsz} (fin outsz, 32 >= width outsz) => State outsz -> [32] -> Chunk -> State outsz
+step st need bs = st2
+  where
+    d1 = parseD1 bs
+    d2 = parseD2 bs
+    st1 = appendIfValid st need d1
+    st2 = appendIfValid st1 need d2
+
+/* 处理整个输入字节串：
+   - 输入长度固定为 3 * chunks
+   - 先按 3 字节切分成若干 chunk
+   - 从初始状态 (j = 0, poly = 全 0) 开始 fold 
+*/
+parseState : {chunks, outsz} (fin chunks, fin outsz, 32 >= width outsz) => [3 * chunks]Byte -> [32] -> State outsz
+parseState bytes need = foldl stepChunk (0, zero) chunksBytes
+  where
+    chunksBytes : [chunks]Chunk
+    chunksBytes = split bytes
+
+    stepChunk : State outsz -> Chunk -> State outsz
+    stepChunk st bs = step st need bs
+
+/* 顶层规格：
+   - 若最终恰好收集到 need 个元素，则返回 0（成功）
+   - 否则返回 -1（表示输入不足，无法得到足够多的合法值）
+   同时返回最终 poly
+*/
+parse : {chunks, outsz} (fin chunks, fin outsz, 32 >= width outsz) => [3 * chunks]Byte -> [32] -> (Ret, Poly outsz)
+parse bytes need =
+  if j == need
+  then (0, poly)
+  else (((-1) : [32]), poly)
+  where
+    (j, poly) = parseState bytes need
+
+/* d1 是 12-bit 拼接结果，因此一定小于 4096 */
+property prop_parseD1_range (bs : [3][8]) =
+  parseD1 bs < (4096 : [16])
+
+/* d2 同理也一定小于 4096 */
+property prop_parseD2_range (bs : [3][8]) =
+  parseD2 bs < (4096 : [16])
+
+/* appendIfValid 最多只会让 j 增加 1 */
+property prop_append_step_4
+  (j    : [32])
+  (poly : [4][16])
+  (need : [32])
+  (d    : [16]) =
+  (j2 == j) || (j2 == j + 1)
+  where
+    (j2, _) = appendIfValid (j, poly) need d
+
+/* 固定实例包装：输入 578 字节，输出 256 个系数
+   只取前 576 字节（192 个完整 3-byte chunk）参与 parse
+*/
+parse_578_256 : [578][8] -> ([32], [256][16])
+parse_578_256 bytes = parse usable (256 : [32])
+  where
+    usable : [576][8]
+    usable = take`{576} bytes
+  
