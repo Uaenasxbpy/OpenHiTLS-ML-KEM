@@ -1,16 +1,3 @@
-/*
- * Parse_new.c
- *
- * 语义保持版、较 SAW-friendly 的 Parse 实现。
- *
- * 说明：
- * 1. 保持原始接口不变，函数名仍叫 Parse，便于直接替换原 bitcode 验证。
- * 2. 主要改动：
- *    - 先按完整 3-byte chunk 数量固定循环；
- *    - 将 d1/d2 的提取拆成纯 helper；
- *    - 将“若合法则追加”拆成单独 helper。
- */
-
 #include <stdint.h>
 
 #define MLKEM_Q 3329u
@@ -18,78 +5,93 @@
 #define CRYPT_MLKEM_KEYLEN_ERROR (-1)
 #define BSL_ERR_PUSH_ERROR(code)
 
-/* 从 3-byte chunk 中提取第一个 12-bit 值：
- * d1 = b0 + low4(b1) << 8
- */
+#define PARSE_INPUT_LEN 578u
+#define PARSE_USABLE_LEN 576u
+#define PARSE_CHUNKS 192u
+#define PARSE_CANDS 384u
+#define PARSE_OUT 256u
+
 static uint16_t Parse_D1(const uint8_t *p)
 {
     return (uint16_t)p[0]
          | (uint16_t)(((uint16_t)p[1] & 0x0Fu) << 8);
 }
 
-/* 从 3-byte chunk 中提取第二个 12-bit 值：
- * d2 = high4(b1) + b2 << 4
- */
 static uint16_t Parse_D2(const uint8_t *p)
 {
     return (uint16_t)(((uint16_t)p[1]) >> 4)
          | (uint16_t)(((uint16_t)p[2]) << 4);
 }
 
-/* 若 d < Q 且 j < n，则将 d 写入 polyNtt[j]，并返回 j + 1；
- * 否则返回原 j。
+/* 选择第 rank 个（从 1 开始计数）有效候选值。
+ * prefix[i+1] = prefix[i] + ok[i]
+ * 因此当 ok[i] == 1 且 prefix[i+1] == rank 时，cand[i] 就是第 rank 个有效值。
  *
- * 这个 helper 把“条件写入 + 更新计数”的逻辑局部化，
- * 便于后续单独建模和单独证明。
+ * 这个函数里虽然有条件判断，但没有符号地址写内存。
  */
-static uint32_t Parse_AppendIfValid(uint16_t *polyNtt,
-                                    uint32_t n,
-                                    uint32_t j,
-                                    uint16_t d)
+static uint16_t SelectByRank(const uint16_t cand[PARSE_CANDS],
+                             const uint8_t ok[PARSE_CANDS],
+                             const uint16_t prefix[PARSE_CANDS + 1],
+                             uint16_t rank)
 {
-    if (j < n && d < MLKEM_Q) {
-        polyNtt[j] = d;
-        return j + 1;
+    uint32_t i;
+    uint16_t result = 0;
+
+    for (i = 0; i < PARSE_CANDS; ++i) {
+        if (ok[i] && prefix[i + 1] == rank) {
+            result = cand[i];
+        }
     }
-    return j;
+
+    return result;
 }
 
-/*
- * Parse: 从字节流中提取 12-bit 值，紧凑写入 polyNtt[]
- *
- * 与原始版本语义等价：
- * - 每轮消耗 3 字节，得到 d1 / d2
- * - d1 < Q 时写入
- * - d2 < Q 且仍需要更多输出时写入
- * - 若完整 chunk 全部处理完后仍未收集到 n 个系数，则返回错误
- *
- * 等价性说明：
- * 原函数在 while (j < n) 中，每次先检查是否还剩至少 3 字节。
- * 这里改为只遍历 full_chunks = arrayLen / 3 个完整 chunk；
- * 若遍历完仍未达到 n，则统一返回 KEYLEN_ERROR。
- * 这与原函数行为一致，包括 arrayLen 不是 3 的倍数的情况。
+/* 专用于 SAW 验证的固定实例版本：
+ * - 输入固定按 578 字节解释
+ * - 实际只使用前 576 字节（192 个完整 chunk）
+ * - 输出固定为 256 个系数
  */
-int32_t Parse(uint16_t *polyNtt, const uint8_t *arrayB, uint32_t arrayLen, uint32_t n)
+int32_t Parse(uint16_t *polyNtt, const uint8_t *arrayB)
 {
-    uint32_t full_chunks = arrayLen / 3u;
-    uint32_t k;
-    uint32_t j = 0;
+    uint16_t cand[PARSE_CANDS];
+    uint8_t ok[PARSE_CANDS];
+    uint16_t prefix[PARSE_CANDS + 1];
 
-    /* 固定按完整 3-byte chunk 推进，而不是让循环退出条件直接依赖 j */
-    for (k = 0; k < full_chunks && j < n; ++k) {
+    uint32_t k;
+    uint32_t i;
+    uint16_t valid_count;
+
+    /* 第一阶段：固定收集 384 个候选值及其有效标志 */
+    for (k = 0; k < PARSE_CHUNKS; ++k) {
         const uint8_t *p = arrayB + 3u * k;
         uint16_t d1 = Parse_D1(p);
         uint16_t d2 = Parse_D2(p);
 
-        j = Parse_AppendIfValid(polyNtt, n, j, d1);
-        j = Parse_AppendIfValid(polyNtt, n, j, d2);
+        cand[2u * k] = d1;
+        cand[2u * k + 1u] = d2;
+
+        ok[2u * k] = (uint8_t)(d1 < MLKEM_Q);
+        ok[2u * k + 1u] = (uint8_t)(d2 < MLKEM_Q);
     }
 
-    /* 若已收集满 n 个系数，则成功；否则说明输入不足 */
-    if (j == n) {
-        return CRYPT_SUCCESS;
+    /* 第二阶段：前缀计数 */
+    prefix[0] = 0;
+    for (i = 0; i < PARSE_CANDS; ++i) {
+        prefix[i + 1u] = (uint16_t)(prefix[i] + (uint16_t)ok[i]);
     }
 
-    BSL_ERR_PUSH_ERROR(CRYPT_MLKEM_KEYLEN_ERROR);
-    return CRYPT_MLKEM_KEYLEN_ERROR;
+    valid_count = prefix[PARSE_CANDS];
+
+    /* 若有效值不足 256 个，则失败 */
+    if (valid_count < PARSE_OUT) {
+        BSL_ERR_PUSH_ERROR(CRYPT_MLKEM_KEYLEN_ERROR);
+        return CRYPT_MLKEM_KEYLEN_ERROR;
+    }
+
+    /* 第三阶段：按固定输出索引生成 polyNtt[0..255] */
+    for (i = 0; i < PARSE_OUT; ++i) {
+        polyNtt[i] = SelectByRank(cand, ok, prefix, (uint16_t)(i + 1u));
+    }
+
+    return CRYPT_SUCCESS;
 }

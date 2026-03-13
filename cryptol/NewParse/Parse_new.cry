@@ -1,21 +1,15 @@
 module Parse_new where
 
-/* 基本类型 */
 type Byte   = [8]
 type Word16 = [16]
-type Word32 = [32]
 type Ret    = [32]
 
-/* 一个完整 chunk 恰好是 3 个字节 */
 type Chunk  = [3]Byte
+type Cands  = [384]Word16
+type OkBits = [384][8]
+type Prefix = [385]Word16
+type Poly   = [256]Word16
 
-/* 输出多项式数组 */
-type Poly n = [n]Word16
-
-/* 显式状态：当前已写入个数 j，以及当前 poly */
-type State n = (Word32, Poly n)
-
-/* 常量定义 */
 q : Word16
 q = 3329
 
@@ -25,102 +19,121 @@ retSuccess = 0
 retKeyLenError : Ret
 retKeyLenError = ((-1) : [32])
 
-/* 从 3-byte chunk 中提取第一个 12-bit 值
-   d1 = b0 + low4(b1) << 8
-*/
 parseD1 : Chunk -> Word16
 parseD1 [b0, b1, _] =
   (zero # b0) + ((zero # (b1 % (16 : [8]))) << 8)
 
-/* 从 3-byte chunk 中提取第二个 12-bit 值
-   d2 = high4(b1) + b2 << 4
-*/
 parseD2 : Chunk -> Word16
 parseD2 [_, b1, b2] =
   ((zero # b1) >> 4) + ((zero # b2) << 4)
 
-/* 对应 C 中的 Parse_AppendIfValid：
-   若 j < n 且 j 仍在输出数组范围内，并且 d < q，
-   则把 d 写到 poly[j]，并返回 j + 1；
-   否则状态不变。
-*/
-parseAppendIfValid :
-  {outsz} (fin outsz, 32 >= width outsz) =>
-  Poly outsz -> Word32 -> Word32 -> Word16 -> State outsz
-parseAppendIfValid poly n j d =
-  if j < n
-  then if j < ((`outsz) : [32])
-       then if d < q
-            then (j + 1, update poly j d)
-            else (j, poly)
-       else (j, poly)
-  else (j, poly)
+usableBytes : [578]Byte -> [576]Byte
+usableBytes bytes = take`{576} bytes
 
-/* 对应 C 中的一轮 chunk 处理：
-   - 先解 d1, d2
-   - 再依次尝试 append
-   - 若当前 j 已经达到 n，则这一轮不再做任何事
-*/
-stepChunk :
-  {outsz} (fin outsz, 32 >= width outsz) =>
-  State outsz -> Word32 -> Chunk -> State outsz
-stepChunk (j0, poly0) n bs =
-  if j0 < n
-  then (j2, poly2)
-  else (j0, poly0)
+chunksOfInput : [578]Byte -> [192]Chunk
+chunksOfInput bytes = split (usableBytes bytes)
+
+candPair : Chunk -> [2]Word16
+candPair bs = [parseD1 bs, parseD2 bs]
+
+collectCandidates : [578]Byte -> Cands
+collectCandidates bytes = join (map candPair (chunksOfInput bytes))
+
+okByte : Word16 -> [8]
+okByte d =
+  if d < q
+  then (1 : [8])
+  else (0 : [8])
+
+collectOk : Cands -> OkBits
+collectOk cand = map okByte cand
+
+prefixStep : Word16 -> [8] -> Word16
+prefixStep acc okb = acc + (zero # okb)
+
+buildPrefix : OkBits -> Prefix
+buildPrefix ok = scanl prefixStep 0 ok
+
+type CandOkPref = (Word16, ([8], Word16))
+
+prefixTail : Prefix -> [384]Word16
+prefixTail pref = drop`{1} pref
+
+zippedTriples : Cands -> OkBits -> Prefix -> [384]CandOkPref
+zippedTriples cand ok pref = zip cand (zip ok (prefixTail pref))
+
+pickOne : Word16 -> CandOkPref -> Word16
+pickOne rank (c, (okb, prefv)) =
+  if (okb != (0 : [8])) /\ (prefv == rank)
+  then c
+  else 0
+
+selectByRank : Cands -> OkBits -> Prefix -> Word16 -> Word16
+selectByRank cand ok pref rank =
+  sum chosen
   where
-    d1 = parseD1 bs
-    d2 = parseD2 bs
+    chosen : [384]Word16
+    chosen = map (pickOne rank) (zippedTriples cand ok pref)
 
-    st1 = parseAppendIfValid poly0 n j0 d1
-    (j1, poly1) = st1
+ranks : [256]Word16
+ranks = [1 .. 256 : Word16]
 
-    st2 = parseAppendIfValid poly1 n j1 d2
-    (j2, poly2) = st2
+buildOutput : Cands -> OkBits -> Prefix -> Poly
+buildOutput cand ok pref =
+  map (selectByRank cand ok pref) ranks
 
-/* 处理完整输入：
-   输入长度必须是 3 * chunks，正好能切成若干完整 chunk。
-   这对应 Parse_new.c 中 full_chunks = arrayLen / 3 的主体语义。
-*/
-parseNewState :
-  {chunks, outsz}
-  (fin chunks, fin outsz, 32 >= width outsz) =>
-  [3 * chunks]Byte -> Word32 -> State outsz
-parseNewState bytes n = finalState
+parse_578_256 : [578]Byte -> (Ret, Poly)
+parse_578_256 bytes =
+  if validCount < (256 : [16])
+  then (retKeyLenError, zero)
+  else (retSuccess, out)
   where
-    chunksBytes : [chunks]Chunk
-    chunksBytes = split bytes
+    cand : Cands
+    cand = collectCandidates bytes
 
-    initState : State outsz
-    initState = (0, zero)
+    ok : OkBits
+    ok = collectOk cand
 
-    stepWithN : State outsz -> Chunk -> State outsz
-    stepWithN st bs = stepChunk st n bs
+    pref : Prefix
+    pref = buildPrefix ok
 
-    finalState = foldl stepWithN initState chunksBytes
+    validCount : Word16
+    validCount = last pref
 
-/* 顶层规格：
-   - 若最终恰好收集到 n 个系数，则返回 0
-   - 否则返回 -1
-*/
-parseNew :
-  {chunks, outsz}
-  (fin chunks, fin outsz, 32 >= width outsz) =>
-  [3 * chunks]Byte -> Word32 -> (Ret, Poly outsz)
-parseNew bytes n =
-  if j == n
-  then (retSuccess, poly)
-  else (retKeyLenError, poly)
+    out : Poly
+    out = buildOutput cand ok pref
+
+zeroInput578 : [578]Byte
+zeroInput578 = zero
+
+/* 测试 1：全 0 输入时，validCount 应该是 384 */
+prop_zero_validCount : Bit
+property prop_zero_validCount =
+  validCount == (384 : [16])
   where
-    (j, poly) = parseNewState bytes n
+    cand : Cands
+    cand = collectCandidates zeroInput578
 
-/* 固定实例包装：
-   对应 C 调用 Parse(poly, bytes, 578, 256)
-   因为 578 不是 3 的倍数，所以只取前 576 字节；
-   最后 2 字节在 C 中也不会形成新的完整 chunk。
-*/
-parseNew_578_256 : [578]Byte -> (Ret, [256]Word16)
-parseNew_578_256 bytes = parseNew usable (256 : [32])
+    ok : OkBits
+    ok = collectOk cand
+
+    pref : Prefix
+    pref = buildPrefix ok
+
+    validCount : Word16
+    validCount = last pref
+
+/* 测试 2：全 0 输入时，Parse 应成功返回 */
+prop_zero_parse_success : Bit
+property prop_zero_parse_success =
+  result == (retSuccess, zero)
   where
-    usable : [576]Byte
-    usable = take`{576} bytes
+    result : (Ret, Poly)
+    result = parse_578_256 zeroInput578
+
+/* 测试 3：输出长度固定为 256，每个系数都是 0 */
+prop_zero_output_all_zero : Bit
+property prop_zero_output_all_zero =
+  out == zero
+  where
+    (_, out) = parse_578_256 zeroInput578
