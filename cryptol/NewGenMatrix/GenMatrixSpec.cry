@@ -1,0 +1,47 @@
+module GenMatrixSpec where
+
+type MLKEM_N                 = 256
+type MLKEM_Q                 = 3329
+type MLKEM_XOF_OUTPUT_LENGTH = 578
+
+type Byte  = [8]
+type Coeff = [16]
+
+BytesToUint12 : [3]Byte -> [2]Coeff
+BytesToUint12 [b0, b1, b2] = [d1, d2]
+  where
+    [hi, lo] = split b1 : [2][4]
+    d1 = (zext b0) + ((zext lo) << 8)
+    d2 = (zext hi) + ((zext b2) << 4)
+
+Candidates : [MLKEM_XOF_OUTPUT_LENGTH]Byte -> [384]Coeff
+Candidates bytes = join [BytesToUint12 b | b <- blocks]
+  where
+    blocks : [192][3]Byte
+    blocks = split (take`{576} bytes)
+
+ValidCount : [MLKEM_XOF_OUTPUT_LENGTH]Byte -> [16]
+ValidCount bytes = foldl step 0 (Candidates bytes)
+  where
+    step acc x = if (x < `MLKEM_Q) then (acc + 1) else acc
+
+EnoughCoeffs : [MLKEM_XOF_OUTPUT_LENGTH]Byte -> Bit
+EnoughCoeffs bytes = (ValidCount bytes) >= `MLKEM_N
+
+Parse_SampleOnly : [MLKEM_XOF_OUTPUT_LENGTH]Byte -> [MLKEM_N]Coeff
+Parse_SampleOnly bytes = poly
+  where
+    step : ([16], [MLKEM_N]Coeff) -> Coeff -> ([16], [MLKEM_N]Coeff)
+    step (count, acc) x =
+      if ((x < `MLKEM_Q) && (count < `MLKEM_N))
+         then (count + 1, update acc count x)
+         else (count, acc)
+
+    (_, poly) = foldl step ((0 : [16]), zero) (Candidates bytes)
+
+gen_matrix_from_oracle_k3 :
+  [3][3][MLKEM_XOF_OUTPUT_LENGTH]Byte -> Bit -> [3][3][MLKEM_N]Coeff
+gen_matrix_from_oracle_k3 oracle isEnc =
+  [ [ Parse_SampleOnly (if isEnc then (oracle @ i @ j) else (oracle @ j @ i))
+      | j <- [0 .. < 3] ]
+    | i <- [0 .. < 3] ]

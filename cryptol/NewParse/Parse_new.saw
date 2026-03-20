@@ -51,4 +51,4 @@ let parse_spec_578_256 = do {
 };
 
 /* 验证 bitcode 中名为 Parse 的函数 */
-llvm_verify m "Parse" [] false parse_spec_578_256 z3;
+llvm_verify m "Parse" [] false parse_spec_578_256 yices;

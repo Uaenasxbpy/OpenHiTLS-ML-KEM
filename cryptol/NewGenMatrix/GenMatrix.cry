@@ -1,0 +1,77 @@
+module ml_kem_pke::NewGenMatrix::GenMatrix where
+
+import ml_kem_pke::hash::hash
+
+type MLKEM_N = 256
+type MLKEM_Q = 3329
+type MLKEM_K_MAX = 4
+type MLKEM_SEED_LEN = 32
+type MLKEM_XOF_OUTPUT_LENGTH = 578
+
+type Byte  = [8]
+type Coeff = [16]
+
+/* 3 字节拆成 2 个 12-bit 候选系数 */
+BytesToUint12 : [3]Byte -> [2]Coeff
+BytesToUint12 [b0, b1, b2] = [d1, d2]
+  where
+    [hi, lo] = split b1 : [2][4]
+
+    d1 = (zext b0) + ((zext lo) << 8)
+    d2 = (zext hi) + ((zext b2) << 4)
+
+/* 只建模 Parse 的“采样输出”过程，不建模错误返回 */
+Parse_SampleOnly : [MLKEM_XOF_OUTPUT_LENGTH]Byte -> [MLKEM_N]Coeff
+Parse_SampleOnly bytes = poly
+  where
+    /* 578 = 576 + 2，只取前 576 字节组成 192 组 3-byte block */
+    blocks : [192][3]Byte
+    blocks = split (take`{576} bytes)
+
+    /* 192 组 -> 384 个候选值 */
+    candidates : [384]Coeff
+    candidates = join [BytesToUint12 b | b <- blocks]
+
+    step : ([16], [MLKEM_N]Coeff) -> Coeff -> ([16], [MLKEM_N]Coeff)
+    step (count, acc) x =
+      if ((x < `MLKEM_Q) && (count < `MLKEM_N))
+         then (count + 1, update acc count x)
+         else (count, acc)
+
+    (_, poly) = foldl step ((0 : [16]), zero) candidates
+
+/* 只建模 GenMatrix 的核心采样逻辑 */
+gen_matrix : {k}
+  (fin k, 1 <= k, k <= MLKEM_K_MAX, width (k - 1) <= 8) =>
+  [MLKEM_SEED_LEN]Byte -> Bit -> [k][k][MLKEM_N]Coeff
+gen_matrix digest isEnc =
+  [ [ gen_poly i j | j <- [0 .. < k] ] | i <- [0 .. < k] ]
+  where
+    gen_poly i j = Parse_SampleOnly xof_out
+      where
+        idx0 : Byte
+        idx0 = if isEnc then (i : Byte) else (j : Byte)
+
+        idx1 : Byte
+        idx1 = if isEnc then (j : Byte) else (i : Byte)
+
+        seed : [MLKEM_SEED_LEN + 2]Byte
+        seed = digest # [idx0, idx1]
+
+        xof_out : [MLKEM_XOF_OUTPUT_LENGTH]Byte
+        xof_out = HashFuncXOF`{outLen = MLKEM_XOF_OUTPUT_LENGTH} seed
+
+// 测试
+test_digest_zero : [MLKEM_SEED_LEN]Byte
+test_digest_zero = zero
+
+test_mat_enc_k2 : [2][2][MLKEM_N]Coeff
+test_mat_enc_k2 = gen_matrix`{k = 2} test_digest_zero True
+
+show_test_mat : [2][2][8]Coeff
+show_test_mat =
+  [ [ take`{8} (test_mat_enc_k2 @ i @ j) | j <- [0 .. < 2] ]
+    | i <- [0 .. < 2] ]
+
+show_test_mat_full : [2][2][MLKEM_N]Coeff
+show_test_mat_full = test_mat_enc_k2

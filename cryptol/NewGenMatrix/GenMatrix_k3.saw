@@ -1,0 +1,59 @@
+import "GenMatrixSpec.cry";
+
+m <- llvm_load_module "GenMatrix.bc";
+
+/* ---------------------------------------------------------
+ * 1. 先证明 Parse_export
+ * --------------------------------------------------------- */
+let parse_spec = do {
+  poly <- llvm_alloc (llvm_array 256 (llvm_int 16));
+  xof  <- llvm_alloc (llvm_array 578 (llvm_int 8));
+
+  xof_val <- llvm_fresh_var "xof_val" (llvm_array 578 (llvm_int 8));
+  llvm_points_to xof (llvm_term xof_val);
+
+  /* Parse 没有边界检查，所以需要这个前提 */
+  llvm_precond {{ EnoughCoeffs xof_val }};
+
+  llvm_execute_func [poly, xof];
+
+  llvm_points_to poly (llvm_term {{ Parse_SampleOnly xof_val }});
+};
+
+parse_thm <- llvm_verify m "Parse_export" [] false parse_spec yices;
+
+/* ---------------------------------------------------------
+ * 2. 验证 hash-忽略版的 k=3 矩阵生成
+ *    GenMatrix_k3_oracle(oracle, out, isEnc)
+ * --------------------------------------------------------- */
+let genmatrix_k3_spec = do {
+  oracle_ptr <- llvm_alloc
+    (llvm_array 3 (llvm_array 3 (llvm_array 578 (llvm_int 8))));
+  out_ptr <- llvm_alloc
+    (llvm_array 3 (llvm_array 3 (llvm_array 256 (llvm_int 16))));
+
+  oracle_val <- llvm_fresh_var "oracle_val"
+    (llvm_array 3 (llvm_array 3 (llvm_array 578 (llvm_int 8))));
+  isEnc <- llvm_fresh_var "isEnc" (llvm_int 1);
+
+  llvm_points_to oracle_ptr (llvm_term oracle_val);
+  llvm_points_to out_ptr (llvm_term {{ zero : [3][3][256][16] }});
+
+  /* 每个 Parse 调用都需要 EnoughCoeffs 前提 */
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 0 @ 0) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 0 @ 1) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 0 @ 2) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 1 @ 0) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 1 @ 1) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 1 @ 2) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 2 @ 0) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 2 @ 1) }};
+  llvm_precond {{ EnoughCoeffs (oracle_val @ 2 @ 2) }};
+
+  llvm_execute_func [oracle_ptr, out_ptr, llvm_term isEnc];
+
+  llvm_points_to out_ptr
+    (llvm_term {{ gen_matrix_from_oracle_k3 oracle_val isEnc }});
+};
+
+genmatrix_k3_thm <- llvm_verify m "GenMatrix_k3_oracle" [] false genmatrix_k3_spec yices;
